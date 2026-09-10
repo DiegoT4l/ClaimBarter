@@ -1,0 +1,25 @@
+name: ${project.name}
+version: ${project.version}
+main: io.github.diegot4l.claimbarter.ClaimBarterPlugin
+api-version: '1.21'
+description: ${project.description}
+author: DiegoT4l
+website: https://github.com/DiegoT4l/ClaimBarter
+depend: [GriefPrevention]
+
+commands:
+  claimbarter:
+    description: Trade items for GriefPrevention claim blocks.
+    usage: /claimbarter <buy|sell|info>
+    aliases: [barter, cbarter]
+
+permissions:
+  claimbarter.buy:
+    description: Allows buying claim blocks with the configured item.
+    default: true
+  claimbarter.sell:
+    description: Allows selling previously bought claim blocks back.
+    default: true
+  claimbarter.reload:
+    description: Allows reloading the configuration.
+    default: op

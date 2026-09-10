@@ -1,0 +1,47 @@
+# ClaimBarter
+#
+# Players hand over a real item and receive GriefPrevention claim blocks.
+# There is no balance and no Vault: the item leaves the inventory, the blocks
+# arrive. If you want an account-based economy, this is the wrong plugin.
+
+currency:
+  # Any Bukkit Material. The item must be plain — no custom name, no
+  # enchantments, no custom model data. See "Known limitations" in the README.
+  item: IRON_INGOT
+
+  # Claim blocks granted per item handed over.
+  # 100 blocks is a 10x10 area.
+  blocks-per-item: 100
+
+selling:
+  # Let players trade claim blocks back for items.
+  enabled: true
+
+  # Fraction of the purchase price returned when selling.
+  # 1.0 is a full refund; 0.5 means half the items come back.
+  # Anything below 1.0 makes buy/sell loops a loss, which is the point.
+  refund-ratio: 0.5
+
+limits:
+  # Ceiling on blocks a single player may hold from this plugin.
+  # 0 means no ceiling.
+  max-purchased-blocks: 0
+
+messages:
+  prefix: "&8[&bClaimBarter&8] &r"
+  bought: "&aBought &f{blocks} &aclaim blocks for &f{items} {item}&a."
+  sold: "&aSold &f{blocks} &aclaim blocks back for &f{items} {item}&a."
+  info: "&7Rate: &f1 {item} &7= &f{blocks} &7claim blocks. You hold &f{purchased} &7purchased and &f{available} &7available."
+  not-enough-items: "&cYou need &f{needed} {item}&c and you have &f{have}&c."
+  not-enough-blocks: "&cYou only have &f{have} &cpurchased claim blocks to sell."
+  blocks-in-use: "&cThose blocks are committed to claims. You have &f{available} &cfree."
+  selling-disabled: "&cSelling claim blocks is disabled on this server."
+  amount-too-small: "&cThat is too small to return a single {item}."
+  limit-reached: "&cYou have reached the purchase ceiling of &f{limit} &cclaim blocks."
+  invalid-amount: "&cGive a whole number greater than zero."
+  overflow: "&cThat would exceed the maximum a player can hold."
+  no-permission: "&cYou do not have permission to do that."
+  players-only: "&cThis command has to be run by a player."
+  usage: "&7Usage: &f/claimbarter buy <items> &7| &fsell <blocks> &7| &finfo"
+  reloaded: "&aConfiguration reloaded."
+  transaction-failed: "&cThe trade failed and your items were returned. Tell an admin."
