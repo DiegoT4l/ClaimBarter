@@ -109,7 +109,7 @@ items second. A crash in the middle costs the plugin, never the server.
 ./mvnw clean package
 ```
 
-Java 21 or newer, but not Maven itself - the wrapper fetches it. GriefPrevention
+Java 25 or newer, but not Maven itself - the wrapper fetches it. GriefPrevention
 comes from JitPack, Paper from the PaperMC repository; both are `provided` and
 are not shaded into the jar (18 KB).
 

@@ -59,7 +59,10 @@ feat(barter)!: price sales in items rather than blocks
 
 ## Building
 
-You need **JDK 21 or newer**. You do not need Maven installed - use the wrapper.
+You need **JDK 25 or newer**. `paper-api` for Paper 26.x ships Java 25 class
+files, which a JDK 21 `javac` cannot read even though the compiled output still
+targets Java 21 (see [SECURITY.md](SECURITY.md)). You do not need Maven
+installed - use the wrapper.
 
 ```bash
 ./mvnw clean package

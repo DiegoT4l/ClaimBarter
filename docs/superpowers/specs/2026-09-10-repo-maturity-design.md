@@ -257,7 +257,7 @@ ClaimBarter does too. It does not, and the current README never says so.
 
 | Purpose | Version | Source |
 |---|---|---|
-| Building ClaimBarter | 21 or newer | `maven.compiler.release=21` (`pom.xml:18`) |
+| Building ClaimBarter | 25 or newer | `paper-api` 26.x ships Java 25 class files |
 | Running on Paper `26.1+` | **25** | F13 |
 | Running on Paper `1.21.10`–`1.21.11` | 21 | F13 |
 
@@ -266,6 +266,17 @@ compatible, so a 21-bytecode jar runs on a Java 25 JVM. That means one artifact
 covers both a `1.21.11` server (Java 21) and a `26.2` server (Java 25). Raising
 `maven.compiler.release` to 25 would lock the plugin out of the entire `1.21.x`
 line for no gain.
+
+That forward-compatibility argument is about runtime, not build time, and the
+two must not be conflated. Compiling still requires JDK 25 or newer regardless
+of `maven.compiler.release` staying at 21: `paper-api:26.2.build.123-stable`
+ships class files with major version 69 (Java 25), and `javac` cannot read a
+class file newer than its own JDK. A JDK 21 `javac` fails with "cannot access
+org.bukkit.Command" (and similar) on every Paper API class it touches, even
+though `--release 21` still constrains the emitted bytecode and the platform
+API surface `javac` is allowed to use. `maven.compiler.release=21` controls
+what is written to the jar; the JDK running Maven controls what `javac` can
+read on the classpath.
 
 ### D8 — `SECURITY.md` threat model
 

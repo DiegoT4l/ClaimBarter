@@ -43,7 +43,7 @@ Spigot, so this is worth stating plainly rather than leaving to inference.
 
 | Purpose | Version |
 | --- | --- |
-| Building ClaimBarter | 21 or newer |
+| Building ClaimBarter | 25 or newer |
 | Running on Paper `26.1+` | 25 |
 | Running on Paper `1.21.10` - `1.21.11` | 21 |
 
