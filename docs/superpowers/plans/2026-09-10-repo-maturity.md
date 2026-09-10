@@ -115,12 +115,14 @@ git switch -c build/maven-wrapper
 ```bash
 cd /Users/diegotalamantes/Documents/projects/ClaimBarter
 mkdir -p .mvn/wrapper
-curl -fsSL -o mvnw https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper-3.3.2/maven-wrapper-distribution/src/resources/mvnw
-curl -fsSL -o mvnw.cmd https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper-3.3.2/maven-wrapper-distribution/src/resources/mvnw.cmd
+curl -fsSL -o mvnw https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper-3.3.2/maven-wrapper-distribution/src/resources/only-mvnw
+curl -fsSL -o mvnw.cmd https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper-3.3.2/maven-wrapper-distribution/src/resources/only-mvnw.cmd
 chmod +x mvnw
+sed -i '' 's/@@project.version@@/3.3.2/g' mvnw mvnw.cmd
+grep -c '@@' mvnw mvnw.cmd
 ```
 
-Expected: both files exist and `mvnw` is executable. If either download 404s, the tag moved — list available tags with `curl -fsSL https://api.github.com/repos/apache/maven-wrapper/tags | grep '"name"'` and use the newest `maven-wrapper-3.x.y`, recording the version you used in the commit message.
+Expected: both files exist and `mvnw` is executable. The `sed` substitution replaces the template variable `@@project.version@@` with the actual version `3.3.2`. The `grep -c '@@'` command must print `0` for both files, confirming no template variables remain. If either download 404s, the tag moved — list available tags with `curl -fsSL https://api.github.com/repos/apache/maven-wrapper/tags | grep '"name"'` and use the newest `maven-wrapper-3.x.y`, recording the version you used in the commit message. The `only-mvnw` variant is used because it is the only-script variant: it reads `distributionUrl` from `.mvn/wrapper/maven-wrapper.properties` and downloads and unzips the Maven distribution directly, with no wrapper jar and no `MavenWrapperMain`, which is what makes `distributionType=only-script` coherent.
 
 - [ ] **Step 3: Write the wrapper properties**
 

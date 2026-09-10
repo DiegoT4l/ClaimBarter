@@ -1,7 +1,7 @@
 # Repository Maturity — Design
 
 - **Date:** 2026-09-10
-- **Status:** Approved (pending spec review)
+- **Status:** Approved
 - **Scope:** Repository infrastructure only. No changes to `src/`.
 
 ## 1. Context
