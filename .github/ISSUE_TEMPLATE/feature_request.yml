@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest a capability ClaimBarter does not have.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read [ROADMAP.md](https://github.com/DiegoT4l/ClaimBarter/blob/main/ROADMAP.md) first. Some limitations
+        are deliberate and are documented in the README under "What it
+        deliberately does not do".
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do on your server that you currently cannot?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should happen instead, in terms of commands and config?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other plugins, config workarounds, or approaches you already tried.
+    validations:
+      required: false

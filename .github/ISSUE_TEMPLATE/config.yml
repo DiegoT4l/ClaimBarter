@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://github.com/DiegoT4l/ClaimBarter/discussions
+    about: Ask about configuration or usage here rather than opening an issue.
+  - name: Download from Hangar
+    url: https://hangar.papermc.io/DiegoT4l/ClaimBarter
+    about: Released builds, changelogs, and version compatibility.
