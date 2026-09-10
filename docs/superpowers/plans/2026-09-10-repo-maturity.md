@@ -1222,18 +1222,22 @@ manual bumps or a build-range pin; neither has been chosen.
 
 - [ ] **Step 3: Write the code of conduct**
 
-Fetch Contributor Covenant 2.1 verbatim and set the enforcement contact:
+Fetch Contributor Covenant 2.1 verbatim and set the enforcement contact. The pinned raw URL serves
+the page's Hugo source, not plain rendered markdown, so the response begins with a `+++`-delimited
+TOML frontmatter block that GitHub's Markdown renderer does not strip - it must be removed after
+fetching or it renders as a literal paragraph above the heading:
 
 ```bash
 curl -fsSL -o CODE_OF_CONDUCT.md https://raw.githubusercontent.com/EthicalSource/contributor_covenant/release/content/version/2/1/code_of_conduct.md
 python3 - <<'PY'
 import re
 t = open('CODE_OF_CONDUCT.md').read()
-t = t.replace('[INSERT CONTACT METHOD]',
-              'a private report through https://github.com/DiegoT4l/ClaimBarter/security/advisories/new')
+t = re.sub(r'^\+\+\+\n.*?\n\+\+\+\n+', '', t, count=1, flags=re.DOTALL)
+t = t.replace('[INSERT CONTACT METHOD]', 'conduct@REPLACE-ME.invalid')
 open('CODE_OF_CONDUCT.md','w').write(t)
 assert 'INSERT CONTACT METHOD' not in t, "contact placeholder still present"
-print("Contributor Covenant 2.1 written with the enforcement contact filled in")
+assert t.startswith('# Contributor Covenant Code of Conduct'), "Hugo frontmatter still present"
+print("Contributor Covenant 2.1 written with frontmatter stripped and the enforcement contact filled in")
 PY
 ```
 
