@@ -51,7 +51,7 @@ jobs:
             --target "${{ github.sha }}"
 
       - name: Publish to the Hangar Snapshot channel
-        uses: benwoo1110/hangar-upload-action@v1
+        uses: benwoo1110/hangar-upload-action@970ef155684950e7ab459edf0b1844aba9c7442d # v1
         with:
           api_token: ${{ secrets.HANGAR_API_TOKEN }}
           slug: ClaimBarter
@@ -61,9 +61,15 @@ jobs:
 
       - name: Assert nothing was committed
         run: |
-          if [ -n "$(git status --porcelain pom.xml CHANGELOG.md .release-please-manifest.json)" ]; then
-            echo "Workspace-only version bump leaked into tracked files. This breaks the fast-forward invariant."
-            git status --porcelain
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "${{ github.sha }}" ]; then
+            echo "HEAD moved from ${{ github.sha }} to $head. This workflow must never commit."
+            git log --oneline "${{ github.sha }}..$head"
             exit 1
           fi
-          echo "No versioned file was committed."
+          if [ -n "$(git status --porcelain CHANGELOG.md .release-please-manifest.json)" ]; then
+            echo "This workflow modified release-please state. Only pom.xml may change, and only in the workspace."
+            git status --porcelain CHANGELOG.md .release-please-manifest.json
+            exit 1
+          fi
+          echo "HEAD unchanged at $head; release-please state untouched. pom.xml is modified in the workspace only, as intended."
