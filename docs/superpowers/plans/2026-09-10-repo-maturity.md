@@ -1369,7 +1369,41 @@ releases are supported: **[SECURITY.md](SECURITY.md)**.
 The floor is `1.21.10` rather than `1.21` because that is what GriefPrevention
 itself requires. The matrix is referenced, never copied - one source of truth.
 
-- [ ] **Step 4: Add a contributing section immediately before `## License`**
+- [ ] **Step 4: Build with the Maven wrapper, not a bare `mvn`**
+
+Find this text in the `## Building` section:
+
+```markdown
+mvn clean package
+```
+
+Replace it with:
+
+```markdown
+./mvnw clean package
+```
+
+Then find the sentence immediately after it:
+
+```markdown
+Java 21 or newer. GriefPrevention comes from JitPack, Paper from the PaperMC
+repository; both are `provided` and are not shaded into the jar (18 KB).
+```
+
+Replace it with:
+
+```markdown
+Java 21 or newer, but not Maven itself - the wrapper fetches it. GriefPrevention
+comes from JitPack, Paper from the PaperMC repository; both are `provided` and
+are not shaded into the jar (18 KB).
+```
+
+The Maven Wrapper was added in Task 2 specifically so contributors and CI do
+not need Maven installed. A bare `mvn clean package` in the README contradicts
+`CONTRIBUTING.md`, which already says `./mvnw clean package`, and instructs
+readers to do the one thing the wrapper exists to make unnecessary.
+
+- [ ] **Step 5: Add a contributing section immediately before `## License`**
 
 ```markdown
 ## Contributing
@@ -1383,7 +1417,7 @@ Security issues go through
 not public issues. See **[SECURITY.md](SECURITY.md)**.
 ```
 
-- [ ] **Step 5: Verify the false claims are gone, the new ones are present, and every link resolves**
+- [ ] **Step 6: Verify the false claims are gone, the new ones are present, and every link resolves**
 
 ```bash
 python3 - <<'PY'
@@ -1401,7 +1435,7 @@ done
 
 Expected: the confirmation line followed by five `link target OK` lines and no `MISSING` line.
 
-- [ ] **Step 6: Commit and promote**
+- [ ] **Step 7: Commit and promote**
 
 ```bash
 git add README.md
