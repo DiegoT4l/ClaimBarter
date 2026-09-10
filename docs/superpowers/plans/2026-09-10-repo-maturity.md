@@ -215,7 +215,7 @@ git switch -c ci/release-please
 }
 ```
 
-This value must match `<version>` at `pom.xml:11` exactly. If it does not, release-please will compute the wrong next version.
+This value must match `<version>` at `pom.xml:9` exactly. If it does not, release-please will compute the wrong next version.
 
 - [ ] **Step 4: Verify both files are valid JSON and the manifest matches the POM**
 
@@ -513,7 +513,7 @@ jobs:
           echo "No versioned file was committed."
 ```
 
-`versions:set` is used rather than `-Drevision` because the `revision` property only applies when the POM declares `<version>${revision}</version>`. `pom.xml:11` holds a literal, so `-Drevision` would be silently ignored and the jar would ship with the wrong version.
+`versions:set` is used rather than `-Drevision` because the `revision` property only applies when the POM declares `<version>${revision}</version>`. `pom.xml:9` holds a literal, so `-Drevision` would be silently ignored and the jar would ship with the wrong version.
 
 The final assertion step exists because the invariant above is the one thing in this plan that fails silently and only shows up later, as a refused fast-forward.
 
@@ -1545,6 +1545,6 @@ gh api repos/DiegoT4l/ClaimBarter/branches/main/protection --jq '.required_statu
 
 **Placeholder scan.** No `TBD`, `TODO`, or "add appropriate X" steps. Every file has literal content. The two `curl` downloads (Task 2, Task 10) target pinned upstream URLs and both carry an explicit recovery path if the URL moves. `CODE_OF_CONDUCT.md` is fetched rather than transcribed because it is a verbatim standard text, and its one substitution is asserted.
 
-**Consistency check.** The jar path `target/ClaimBarter-<version>.jar` matches `finalName` at `pom.xml:52`. Version resolution uses `help:evaluate -Dexpression=project.version -DforceStdout` identically in Tasks 5 and 6. The Hangar slug is `ClaimBarter` and the secret `HANGAR_API_TOKEN` in both publish steps. Channel names are `Snapshot` in Task 5 and `Release` in Task 6, matching the spec. The commit-message prefixes in Task 10's Dependabot config (`build`, `ci`) are drawn from the type list enforced in Task 4. The manifest version `1.0.0` in Task 3 matches `pom.xml:11`.
+**Consistency check.** The jar path `target/ClaimBarter-<version>.jar` matches `finalName` at `pom.xml:49`. Version resolution uses `help:evaluate -Dexpression=project.version -DforceStdout` identically in Tasks 5 and 6. The Hangar slug is `ClaimBarter` and the secret `HANGAR_API_TOKEN` in both publish steps. Channel names are `Snapshot` in Task 5 and `Release` in Task 6, matching the spec. The commit-message prefixes in Task 10's Dependabot config (`build`, `ci`) are drawn from the type list enforced in Task 4. The manifest version `1.0.0` in Task 3 matches `pom.xml:9`.
 
 **One risk worth naming.** Task 12 Step 9 exists because release-please commits to `main`, which breaks the fast-forward invariant in the one direction the model does not otherwise handle. Skipping it makes the *next* promotion fail with a confusing error rather than an obvious one.

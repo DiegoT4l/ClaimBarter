@@ -10,7 +10,7 @@ ClaimBarter is a Paper plugin that trades a configured item for GriefPrevention
 claim blocks without Vault. It works, it is published under GPL-3.0, and the
 repository is deliberately minimal: a single commit (`f8233d1`), one branch
 (`main`), no CI, no templates, no contribution guide, and a version number
-hardcoded at `pom.xml:11`.
+hardcoded at `pom.xml:9`.
 
 The goal is to make the repository read as trustworthy to a server administrator
 evaluating whether to install the plugin, and to make releases come out without
@@ -79,7 +79,7 @@ F3 and F11 together expose three statements that cannot all be right:
 1. `README.md` promises "Paper 1.21+", but GriefPrevention requires `1.21.10+`.
    A server on `1.21.0`–`1.21.9` cannot run GriefPrevention, and therefore
    cannot run ClaimBarter — yet the README invites it to try.
-2. `plugin.yml:4` declares `api-version: '1.21'` while `pom.xml:38` compiles
+2. `plugin.yml:4` declares `api-version: '1.21'` while `pom.xml:37` compiles
    against Paper `26.2`.
 3. `README.md` does not mention Spigot at all, but the plugin cannot run on it
    (see Decision D6).
@@ -157,7 +157,7 @@ Release (F9).
 Configuration: `release-please-config.json` and `.release-please-manifest.json`.
 
 `plugin.yml` already consumes `${project.version}` through Maven resource
-filtering (`pom.xml:52-57`), so the jar version and the version the server
+filtering (`pom.xml:50-55`), so the jar version and the version the server
 reports stay synchronised with no extra wiring. Builds off `dev` report
 `1.1.0-SNAPSHOT` and release candidates off `staging` report `1.1.0-rc.N`, so an
 administrator can tell at a glance which tier a jar came from.
@@ -257,7 +257,7 @@ ClaimBarter does too. It does not, and the current README never says so.
 
 | Purpose | Version | Source |
 |---|---|---|
-| Building ClaimBarter | 21 or newer | `maven.compiler.release=21` (`pom.xml:20`) |
+| Building ClaimBarter | 21 or newer | `maven.compiler.release=21` (`pom.xml:18`) |
 | Running on Paper `26.1+` | **25** | F13 |
 | Running on Paper `1.21.10`–`1.21.11` | 21 | F13 |
 
@@ -298,7 +298,7 @@ already documents as deliberate, under "What it deliberately does not do":
 3. Accept items carrying metadata under an explicit opt-in.
 4. Track the GriefPrevention 17.x/18.x line once it has a stable release (F5).
 5. Decide a policy for the exact `paper-api` pin — `26.2.build.123-stable`
-   (`pom.xml:38`) ages on its own.
+   (`pom.xml:37`) ages on its own.
 
 ### D11 — Recommended: raise `api-version` to `1.21.10` (requires approval)
 
@@ -386,7 +386,7 @@ LICENSE
   `./mvnw -B package`; create a GitHub release marked `prerelease: true`;
   publish to Hangar with channel `Snapshot`.
 - **Why `versions:set` and not `-Drevision`:** the `revision` property only
-  works when the POM declares its version as `${revision}`. `pom.xml:11` holds a
+  works when the POM declares its version as `${revision}`. `pom.xml:9` holds a
   literal version, so `-Drevision` would be silently ignored and the artifact
   would ship with the wrong version.
 - **Constraint:** this workflow must not commit anything. It never touches
