@@ -1,5 +1,10 @@
 # ClaimBarter
 
+[![CI](https://github.com/DiegoT4l/ClaimBarter/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/DiegoT4l/ClaimBarter/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/DiegoT4l/ClaimBarter?sort=semver)](https://github.com/DiegoT4l/ClaimBarter/releases/latest)
+[![Hangar](https://img.shields.io/hangar/dt/ClaimBarter)](https://hangar.papermc.io/DiegoT4l/ClaimBarter)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+
 Players hand over a real item and receive GriefPrevention claim blocks. No
 Vault, no economy plugin, no balances.
 
@@ -25,8 +30,15 @@ GriefPrevention's bonus pool. Nothing is stored in between.
 1. Drop the jar in `plugins/` next to GriefPrevention.
 2. Restart. Editing `config.yml` afterwards needs only `/claimbarter reload`.
 
-Requires **GriefPrevention 16.18.7+** and **Paper 1.21+**. Declared as a hard
-dependency, so the plugin will not load without it.
+Requires **Paper or Purpur 1.21.10+** (tested on 26.2) and **GriefPrevention
+16.18.7**. GriefPrevention is declared as a hard dependency, so the plugin will
+not load without it.
+
+**Spigot is not supported** - message rendering uses Adventure, which Paper
+bundles and Spigot does not.
+
+Full compatibility matrix, including Java versions and which GriefPrevention
+releases are supported: **[SECURITY.md](SECURITY.md)**.
 
 ## Commands
 
@@ -99,6 +111,16 @@ mvn clean package
 
 Java 21 or newer. GriefPrevention comes from JitPack, Paper from the PaperMC
 repository; both are `provided` and are not shaded into the jar (18 KB).
+
+## Contributing
+
+Pull requests target `dev`, commit messages follow Conventional Commits, and
+releases are automated. See **[CONTRIBUTING.md](CONTRIBUTING.md)** before you
+start, and **[ROADMAP.md](ROADMAP.md)** for what is already under consideration.
+
+Security issues go through
+[private vulnerability reporting](https://github.com/DiegoT4l/ClaimBarter/security/advisories/new),
+not public issues. See **[SECURITY.md](SECURITY.md)**.
 
 ## License
 
