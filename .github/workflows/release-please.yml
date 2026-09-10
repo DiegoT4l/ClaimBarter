@@ -1,4 +1,3 @@
-# .github/workflows/release-please.yml
 name: Release Please
 
 on:
