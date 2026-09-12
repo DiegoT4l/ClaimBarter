@@ -53,7 +53,7 @@ jobs:
       - name: Publish to the Hangar Snapshot channel
         uses: benwoo1110/hangar-upload-action@970ef155684950e7ab459edf0b1844aba9c7442d # v1
         with:
-          api_token: ${{ secrets.HANGAR_API_TOKEN }}
+          api_token: ${{ secrets.MCPAPER_API_KEY }}
           slug: ClaimBarter
           version: ${{ steps.version.outputs.value }}
           channel: Snapshot
