@@ -8,6 +8,12 @@ updates:
     commit-message:
       prefix: "build"
     open-pull-requests-limit: 5
+    ignore:
+      # ClaimBarter tracks the GriefPrevention 16.x line on purpose. 17.x and
+      # 18.x have no published release, carry breaking changes, and upstream
+      # does not consider them production-ready. See SECURITY.md.
+      - dependency-name: "com.github.GriefPrevention:GriefPrevention"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
