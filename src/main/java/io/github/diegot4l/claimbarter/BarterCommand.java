@@ -18,8 +18,6 @@ import java.util.Locale;
  */
 final class BarterCommand implements CommandExecutor, TabCompleter
 {
-    private static final List<String> SUBCOMMANDS = List.of("buy", "sell", "info");
-
     private final ClaimBarterPlugin plugin;
 
     BarterCommand(ClaimBarterPlugin plugin)
@@ -138,12 +136,28 @@ final class BarterCommand implements CommandExecutor, TabCompleter
         plugin.messages().send(player, result.messageKey(), result.placeholders());
     }
 
+    /**
+     * Offers only the subcommands the sender may actually run.
+     *
+     * <p>Completing one that {@link #onCommand} goes on to refuse advertises a
+     * command and then denies it, which reads as a bug on any server that
+     * restricts trading to a rank.
+     */
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args)
     {
         if (args.length == 1)
         {
-            List<String> options = new ArrayList<>(SUBCOMMANDS);
+            List<String> options = new ArrayList<>();
+            if (sender.hasPermission("claimbarter.buy"))
+            {
+                options.add("buy");
+            }
+            if (sender.hasPermission("claimbarter.sell"))
+            {
+                options.add("sell");
+            }
+            options.add("info");
             if (sender.hasPermission("claimbarter.reload"))
             {
                 options.add("reload");
