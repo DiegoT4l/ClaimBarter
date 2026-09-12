@@ -57,6 +57,13 @@ jobs:
           slug: ClaimBarter
           version: ${{ steps.version.outputs.value }}
           channel: Snapshot
+          description: |
+            Automated release candidate built from `staging` at ${{ github.sha }}.
+
+            **Not a stable release.** Production servers should use the Release
+            channel.
+
+            Requires GriefPrevention 16.18.7 and Paper 1.21.10+ (tested on 26.2).
           files: '[{"path": "target/ClaimBarter-${{ steps.version.outputs.value }}.jar", "platforms": ["PAPER"]}]'
           platform_dependencies: '{"PAPER": ["1.21.10", "1.21.11", "26.2"]}'
           plugin_dependencies: '{"PAPER": [{"name": "GriefPrevention", "required": true, "externalUrl": null, "platform": "PAPER"}]}'

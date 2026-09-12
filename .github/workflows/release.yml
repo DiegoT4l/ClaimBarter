@@ -51,6 +51,26 @@ jobs:
             "target/ClaimBarter-${{ steps.version.outputs.value }}.jar" \
             --clobber
 
+      - name: Compose the Hangar description
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="$(gh release view "$TAG" --json body -q .body)"
+          if [ -z "$notes" ]; then
+            notes="ClaimBarter $TAG."
+          fi
+          jar="target/ClaimBarter-${{ steps.version.outputs.value }}.jar"
+          {
+            echo "value<<HANGAR_EOF"
+            echo "$notes"
+            echo
+            echo "Requires GriefPrevention 16.18.7 and Paper 1.21.10+ (tested on 26.2)."
+            echo
+            echo "sha256 of the jar: \`$(sha256sum "$jar" | cut -d' ' -f1)\`"
+            echo "HANGAR_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish to the Hangar Release channel
         uses: benwoo1110/hangar-upload-action@970ef155684950e7ab459edf0b1844aba9c7442d # v1
         with:
@@ -58,6 +78,7 @@ jobs:
           slug: ClaimBarter
           version: ${{ steps.version.outputs.value }}
           channel: Release
+          description: ${{ steps.notes.outputs.value }}
           files: '[{"path": "target/ClaimBarter-${{ steps.version.outputs.value }}.jar", "platforms": ["PAPER"]}]'
           platform_dependencies: '{"PAPER": ["1.21.10", "1.21.11", "26.2"]}'
           plugin_dependencies: '{"PAPER": [{"name": "GriefPrevention", "required": true, "externalUrl": null, "platform": "PAPER"}]}'
