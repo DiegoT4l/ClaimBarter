@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -17,8 +18,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create or update the release PR
+        id: release
         uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # workflow_dispatch is the one event GITHUB_TOKEN may still trigger, so
+      # this is what actually gets the jar built and published.
+      - name: Publish the release artifacts
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yml \
+            -R "${{ github.repository }}" \
+            -f tag="${{ steps.release.outputs.tag_name }}"

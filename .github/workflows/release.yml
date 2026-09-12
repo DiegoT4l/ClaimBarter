@@ -3,20 +3,31 @@ name: Release
 on:
   release:
     types: [published]
+  # A release published with GITHUB_TOKEN never fires the release event, so
+  # release-please dispatches this workflow itself. Also lets a tag be
+  # republished by hand.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build and publish, for example v1.0.1.
+        required: true
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   release:
     name: Attach the jar and publish to Hangar
     runs-on: ubuntu-latest
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
     steps:
       - name: Check out the released tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG }}
 
       - name: Set up JDK 25
         uses: actions/setup-java@v4
@@ -36,7 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "${{ env.TAG }}" \
             "target/ClaimBarter-${{ steps.version.outputs.value }}.jar" \
             --clobber
 
