@@ -48,3 +48,5 @@ jobs:
           version: ${{ steps.version.outputs.value }}
           channel: Release
           files: '[{"path": "target/ClaimBarter-${{ steps.version.outputs.value }}.jar", "platforms": ["PAPER"]}]'
+          platform_dependencies: '{"PAPER": ["1.21.10", "1.21.11", "26.2"]}'
+          plugin_dependencies: '{"PAPER": [{"name": "GriefPrevention", "required": true, "externalUrl": null, "platform": "PAPER"}]}'
