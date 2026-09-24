@@ -41,12 +41,14 @@ import java.util.logging.Logger;
  * re-saving does not help: a second writer truncates the same file with no
  * ordering against the first.
  *
- * <p>DataStore.savePlayerDataSync would close both, because it performs the
- * write on the calling thread. It is deliberately not used. That would put
- * file I/O on the main thread on every trade, and a stall there is felt by
- * everyone on the server rather than by the one player trading. The residual
- * risk is a narrow window on a path that only opens when something has already
- * gone wrong; the cost would be paid on every success.
+ * <p>DataStore.savePlayerDataSync performs the write on the calling thread.
+ * It is used for rollbacks and only for rollbacks. On the trade itself it
+ * would put file I/O on the main thread on every purchase and every sale, and
+ * a stall there is felt by everyone on the server rather than by the one
+ * player trading - a cost paid on every success to guard a path that only
+ * opens when something has already gone wrong. On the rollback that reasoning
+ * inverts: it runs rarely, nothing else is in flight to race, and leaving the
+ * correction in memory alone is what the failure above describes.
  *
  * <p>So the guarantee here is narrower, and chosen rather than assumed: a
  * trade that cannot be completed is refused before anything moves, a trade
@@ -149,8 +151,10 @@ final class BarterService
         // /adjustbonusclaimblocks or another plugin may have credited the same
         // pool. Restoring the absolute snapshot would erase it.
         data.setBonusClaimBlocks(data.getBonusClaimBlocks() - (int) blocks);
-        // Refund before logging. The refund is the safety property and the log
-        // is diagnostics, so the order matters if one of them cannot run.
+        // Completing the undo comes before the refund, because minting blocks
+        // is the worse half of the trade to leave behind. Both come before the
+        // log, which is diagnostics.
+        persistRollback(store, playerId, data, player);
         int returned = deliver(player, items, "refund for a failed purchase");
         logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
                 + "; took back the " + blocks + " claim blocks granted and returned "
@@ -234,6 +238,7 @@ final class BarterService
             // Adds this sale's own deduction back, rather than writing the
             // snapshot, for the same reason as buy().
             data.setBonusClaimBlocks(data.getBonusClaimBlocks() + blocks);
+            persistRollback(store, playerId, data, player);
             logger.log(Level.SEVERE, "Sale failed for " + player.getName()
                     + "; gave back the " + blocks + " claim blocks deducted"
                     + ", no items paid out", failure);
@@ -306,6 +311,46 @@ final class BarterService
                     + ": GriefPrevention's data store is unavailable");
         }
         return store;
+    }
+
+    /**
+     * Writes a rollback to disk on the calling thread.
+     *
+     * <p>In the usual case there is nothing to correct: savePlayerData's whole
+     * body is {@code new SavePlayerDataThread(...).start()}, so if it threw,
+     * no thread was started and nothing of this trade ever reached the file.
+     * What this covers is the other case. GriefPrevention saves the same
+     * PlayerData from several places, and overrideSavePlayerData reads
+     * getBonusClaimBlocks() at serialization time, so an unrelated save that
+     * happened to serialize between the grant and the failure will have
+     * written the abandoned total. Then the file is wrong and only a write
+     * fixes it.
+     *
+     * <p>Synchronous, unlike the trade itself. Here the cost is paid only
+     * after something has already gone wrong, and the write completes before
+     * this returns rather than being handed to a thread that has to race the
+     * one that may have just corrupted the file. That is narrower than it
+     * sounds: an async writer already in flight can still truncate afterwards.
+     * What is guaranteed is ordering against anything that starts later.
+     *
+     * <p>Best effort. It can fail in turn - most obviously when the data store
+     * is the thing that went away - and it must not throw on top of the
+     * failure already being unwound, so it logs instead. The log does not name
+     * a number, because which value is on disk is exactly what is unknown here.
+     */
+    private void persistRollback(DataStore store, UUID playerId, PlayerData data, Player player)
+    {
+        try
+        {
+            store.savePlayerDataSync(playerId, data);
+        }
+        catch (RuntimeException unrecoverable)
+        {
+            logger.log(Level.SEVERE, "Rolled back " + player.getName()
+                    + " in memory but could not write it out; if another save had already"
+                    + " serialized the abandoned total, the file still holds it",
+                    unrecoverable);
+        }
     }
 
     /**
