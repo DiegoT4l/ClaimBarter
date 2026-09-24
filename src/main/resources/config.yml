@@ -82,15 +82,12 @@ messages:
   # promise items back: on a sale none were ever handed over.
   transaction-failed: "&cThe trade failed and was rolled back. Nothing was charged. Tell an admin."
 
-  # NEW KEYS. Message keys have no built-in defaults, so a server upgrading
-  # with its own config.yml will render "Missing message: <key>" until these
-  # two are copied across. Both only appear on paths that are already going
-  # wrong, but copying them is worth doing.
-
-  # A trade failed and the items could not all be handed back. {lost} is how
-  # many never arrived. Distinct from transaction-failed because that one
-  # promises nothing was charged, which here would be a lie.
-  items-lost: "&cThe trade failed and &f{lost}&c of your items could not be returned. Tell an admin."
+  # Some of the items owed never reached the player: a refund after a failed
+  # purchase, or a payout for a sale that did go through. {lost} is how many,
+  # and {item} agrees with it. Worded to claim neither that the trade failed
+  # nor that the items are being "returned", because only one of those is true
+  # in each case.
+  items-lost: "&cSomething went wrong and &f{lost} {item}&c did not reach you. Tell an admin."
 
   # GriefPrevention's claim data could not be reached, so nothing was even
   # attempted. Distinct from transaction-failed because no trade was started,

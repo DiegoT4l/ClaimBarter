@@ -77,10 +77,34 @@ final class Messages
         String template = values.get(key);
         if (template == null)
         {
-            // A missing key is a packaging bug, not a player-facing condition.
-            template = "&cMissing message: " + key;
+            // A missing key is usually a packaging bug, but it is also what an
+            // upgraded server sees for a key added after its config.yml was
+            // written, since saveDefaultConfig never overwrites one. The values
+            // are appended so the message still carries its numbers: a player
+            // told only "Missing message: items-lost" cannot tell an admin how
+            // many items to restore.
+            template = "&cMissing message: " + key + describe(placeholders);
         }
         return SERIALIZER.deserialize(prefix + fill(template, placeholders));
+    }
+
+    /** Renders key=value pairs for the missing-key fallback, or "" if none. */
+    private static String describe(Object... placeholders)
+    {
+        if (placeholders.length < 2 || placeholders.length % 2 != 0)
+        {
+            return "";
+        }
+        StringBuilder detail = new StringBuilder(" (");
+        for (int i = 0; i < placeholders.length; i += 2)
+        {
+            if (i > 0)
+            {
+                detail.append(", ");
+            }
+            detail.append(placeholders[i]).append('=').append(placeholders[i + 1]);
+        }
+        return detail.append(')').toString();
     }
 
     /**

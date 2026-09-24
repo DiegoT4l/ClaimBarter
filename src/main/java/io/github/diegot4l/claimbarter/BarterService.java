@@ -3,6 +3,8 @@ package io.github.diegot4l.claimbarter;
 import me.ryanhamshire.GriefPrevention.DataStore;
 import me.ryanhamshire.GriefPrevention.GriefPrevention;
 import me.ryanhamshire.GriefPrevention.PlayerData;
+import org.bukkit.Location;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
@@ -113,13 +115,6 @@ final class BarterService
             return Result.fail("limit-reached", "limit", settings.maxPurchasedBlocks());
         }
 
-        // Boxed now, on the happy path. setBonusClaimBlocks takes an Integer,
-        // so every call autoboxes, and Integer.valueOf allocates for anything
-        // outside -128..127 - which is every realistic block total. The
-        // rollback below may be running precisely because the heap is
-        // exhausted, so it must not be the thing that allocates.
-        Integer rollbackTo = bonusBefore;
-
         removeCurrency(inventory, items);
 
         Throwable failure = null;
@@ -148,23 +143,29 @@ final class BarterService
                     "blocks", blocks, "items", items, "item", settings.currencyName(items));
         }
 
-        data.setBonusClaimBlocks(rollbackTo);
+        // Subtracts this purchase's own grant rather than writing back the
+        // total read at the top. PlayerData is GriefPrevention's live shared
+        // object, and between that read and here an operator's
+        // /adjustbonusclaimblocks or another plugin may have credited the same
+        // pool. Restoring the absolute snapshot would erase it.
+        data.setBonusClaimBlocks(data.getBonusClaimBlocks() - (int) blocks);
         // Refund before logging. The refund is the safety property and the log
-        // is diagnostics; composing the log message allocates, and under the
-        // OutOfMemoryError this path exists for, allocation is exactly what
-        // fails. Ordering them the other way trades the player's items for a
-        // console line.
+        // is diagnostics, so the order matters if one of them cannot run.
         int returned = deliver(player, items, "refund for a failed purchase");
         logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
-                + "; bonus claim blocks restored to " + bonusBefore + " and "
-                + returned + " of " + items + " item(s) returned", failure);
+                + "; took back the " + blocks + " claim blocks granted and returned "
+                + returned + " of " + items + " item(s)", failure);
 
         if (failure instanceof Error error)
         {
+            // The unwind is done; the JVM's problem is not this plugin's to
+            // swallow. The player gets Bukkit's generic error rather than a
+            // count, which is why deliver() has already logged the shortfall.
             throw error;
         }
         return returned < items
-                ? Result.fail("items-lost", "lost", items - returned)
+                ? Result.fail("items-lost",
+                        "lost", items - returned, "item", settings.currencyName(items - returned))
                 : Result.fail("transaction-failed");
     }
 
@@ -217,9 +218,6 @@ final class BarterService
             return Result.fail("amount-too-small", "item", settings.currencyName());
         }
 
-        // Boxed ahead of the write, for the same reason as in buy().
-        Integer rollbackTo = purchased;
-
         Throwable failure = null;
         try
         {
@@ -233,9 +231,11 @@ final class BarterService
 
         if (failure != null)
         {
-            data.setBonusClaimBlocks(rollbackTo);
+            // Adds this sale's own deduction back, rather than writing the
+            // snapshot, for the same reason as buy().
+            data.setBonusClaimBlocks(data.getBonusClaimBlocks() + blocks);
             logger.log(Level.SEVERE, "Sale failed for " + player.getName()
-                    + "; bonus claim blocks restored to " + purchased
+                    + "; gave back the " + blocks + " claim blocks deducted"
                     + ", no items paid out", failure);
             if (failure instanceof Error error)
             {
@@ -251,7 +251,8 @@ final class BarterService
         int paid = deliver(player, items, "payout for a sale");
         if (paid < items)
         {
-            return Result.fail("items-lost", "lost", items - paid);
+            return Result.fail("items-lost",
+                    "lost", items - paid, "item", settings.currencyName(items - paid));
         }
 
         return Result.ok("sold",
@@ -297,7 +298,11 @@ final class BarterService
         DataStore store = plugin == null ? null : plugin.dataStore;
         if (store == null)
         {
-            logger.severe("Refused " + operation + " for " + player.getName()
+            // WARNING, not SEVERE. Nothing moved, and /claimbarter info needs
+            // no permission and has no cooldown, so a player can repeat this
+            // at will during a GriefPrevention reload. At SEVERE it would bury
+            // the lines that report real item loss.
+            logger.warning("Refused " + operation + " for " + player.getName()
                     + ": GriefPrevention's data store is unavailable");
         }
         return store;
@@ -317,11 +322,21 @@ final class BarterService
      * <p>The count returned is what the caller reports. Reporting the amount
      * requested instead would send an operator to restore items the player had
      * already received, turning an item loss into item duplication.
+     *
+     * <p>A dropped stack is only counted once the entity exists. World
+     * .dropItemNaturally returns the Item whether or not ItemSpawnEvent was
+     * cancelled, so the return value carries no signal; an anti-lag or region
+     * plugin cancelling the spawn destroys the stack silently. isValid() is
+     * what distinguishes them.
      */
     private int deliver(Player player, int amount, String context)
     {
         int maxStack = settings.currency().getMaxStackSize();
+        // The player cannot move during a synchronous command, so this is
+        // resolved once rather than per dropped stack.
+        Location where = player.getLocation();
         int delivered = 0;
+        boolean threw = false;
         try
         {
             int remaining = amount;
@@ -340,17 +355,37 @@ final class BarterService
                 delivered += size - notStored;
                 for (ItemStack drop : leftover.values())
                 {
-                    player.getWorld().dropItemNaturally(player.getLocation(), drop);
-                    delivered += drop.getAmount();
+                    Item dropped = player.getWorld().dropItemNaturally(where, drop);
+                    if (dropped.isValid())
+                    {
+                        delivered += drop.getAmount();
+                    }
                 }
             }
         }
-        catch (RuntimeException failure)
+        catch (Throwable failure)
         {
+            // Throwable, because both callers are unwinding a failure that may
+            // already be an Error. Logging here is the only record of what was
+            // owed, so it happens before the Error is passed on.
+            threw = true;
             logger.log(Level.SEVERE, "Handing " + amount + " item(s) to " + player.getName()
                     + " as a " + context + " stopped after " + delivered
                     + "; the remaining " + (amount - delivered)
                     + " are lost and must be restored by hand", failure);
+            if (failure instanceof Error error)
+            {
+                throw error;
+            }
+        }
+        if (!threw && delivered < amount)
+        {
+            // Nothing threw, so the shortfall is a drop that was cancelled
+            // rather than an exception. It leaves no other trace at all.
+            logger.severe("Only " + delivered + " of " + amount + " item(s) reached "
+                    + player.getName() + " as a " + context
+                    + "; the rest were destroyed before they landed, most likely by"
+                    + " another plugin cancelling ItemSpawnEvent");
         }
         return delivered;
     }
