@@ -23,24 +23,33 @@ import java.util.logging.Logger;
  * and the items handed over second, so a failure cannot duplicate items.
  * Either way the loser of a crash is the plugin, never the server.
  *
- * <p>Two limits on that promise are worth stating, because both live in
- * GriefPrevention 16.18.7 and neither can be closed from out here.
+ * <p>What that promise does not cover is worth stating plainly, because the
+ * limits live in GriefPrevention 16.18.7 rather than here.
  *
- * <p>A write failure is invisible. DataStore.savePlayerData only starts a
- * thread, and FlatFileDataStore.overrideSavePlayerData wraps the write in
- * catch (Exception), so a full disk or a permissions fault is logged by
- * GriefPrevention and reported to this plugin as success. Detecting it would
- * take a read-back after every save.
+ * <p><b>A write failure is invisible.</b> DataStore.savePlayerData only starts
+ * a thread, and FlatFileDataStore.overrideSavePlayerData wraps the write in
+ * catch (Exception). A full disk or a permissions fault is logged by
+ * GriefPrevention and reported to this plugin as success.
  *
- * <p>An in-memory rollback is not guaranteed to reach a save already in
- * flight. overrideSavePlayerData reads getBonusClaimBlocks() at serialization
- * time on its own thread, PlayerData.bonusClaimBlocks is neither volatile nor
- * read under a lock, and overrideSavePlayerData is not synchronized either.
- * So a concurrent save may serialize a value this class has already corrected.
- * Re-saving does not fix it: a second writer truncates the same file with no
- * ordering against the first. What does help is never starting a trade that
- * will have to be unwound, which is why the data store is resolved before any
- * item or block is touched.
+ * <p><b>A rollback may not reach a save already in flight.</b>
+ * overrideSavePlayerData reads getBonusClaimBlocks() at serialization time on
+ * its own thread; PlayerData.bonusClaimBlocks is neither volatile nor read
+ * under a lock, and overrideSavePlayerData is not synchronized. So a
+ * concurrent save can serialize a value this class has already corrected, and
+ * re-saving does not help: a second writer truncates the same file with no
+ * ordering against the first.
+ *
+ * <p>DataStore.savePlayerDataSync would close both, because it performs the
+ * write on the calling thread. It is deliberately not used. That would put
+ * file I/O on the main thread on every trade, and a stall there is felt by
+ * everyone on the server rather than by the one player trading. The residual
+ * risk is a narrow window on a path that only opens when something has already
+ * gone wrong; the cost would be paid on every success.
+ *
+ * <p>So the guarantee here is narrower, and chosen rather than assumed: a
+ * trade that cannot be completed is refused before anything moves, a trade
+ * that fails partway is unwound as far as it can be, and nothing is reported
+ * to the player as having worked when it did not.
  */
 final class BarterService
 {
@@ -82,18 +91,10 @@ final class BarterService
                     "needed", items, "have", held, "item", settings.currencyName(items));
         }
 
-        // Resolved before anything is taken from the player. The store is a
-        // public mutable field that GriefPrevention clears as it unloads, and
-        // it going away mid-tick is the only failure this method can actually
-        // hit. Refusing here rather than unwinding later means a trade that
-        // cannot complete is never started: no items taken, no blocks granted,
-        // nothing left half-done.
-        DataStore store = dataStore();
+        DataStore store = dataStore("a purchase", player);
         if (store == null)
         {
-            logger.severe("Purchase refused for " + player.getName()
-                    + ": GriefPrevention's data store is unavailable");
-            return Result.fail("transaction-failed");
+            return Result.fail("data-unavailable");
         }
 
         // Widened to long so the ceiling checks below cannot themselves overflow.
@@ -112,8 +113,16 @@ final class BarterService
             return Result.fail("limit-reached", "limit", settings.maxPurchasedBlocks());
         }
 
+        // Boxed now, on the happy path. setBonusClaimBlocks takes an Integer,
+        // so every call autoboxes, and Integer.valueOf allocates for anything
+        // outside -128..127 - which is every realistic block total. The
+        // rollback below may be running precisely because the heap is
+        // exhausted, so it must not be the thing that allocates.
+        Integer rollbackTo = bonusBefore;
+
         removeCurrency(inventory, items);
-        boolean granted = false;
+
+        Throwable failure = null;
         try
         {
             data.setBonusClaimBlocks((int) updated);
@@ -121,42 +130,42 @@ final class BarterService
             // explicit: "MUST be called after you're done making changes,
             // otherwise a reload will lose them."
             store.savePlayerData(playerId, data);
-            granted = true;
         }
-        catch (RuntimeException failure)
+        catch (Throwable thrown)
         {
-            logger.log(Level.SEVERE, "Purchase failed for " + player.getName(), failure);
-        }
-        finally
-        {
-            // The unwind lives in finally, not in the catch, so it also runs
-            // when savePlayerData throws an Error. Its entire body in
-            // GriefPrevention 16.18.7 is `new SavePlayerDataThread(...).start()`,
-            // and the realistic way that fails on a loaded server is
-            // OutOfMemoryError from native thread creation. Catching only
-            // RuntimeException would let it escape with the items already taken,
-            // which SECURITY.md classes as a vulnerability rather than a bug.
-            //
-            // setBonusClaimBlocks is a bare field write and cannot throw, so
-            // the grant is undone first: left in place, a later save would
-            // persist blocks nobody paid for.
-            if (!granted)
-            {
-                data.setBonusClaimBlocks(bonusBefore);
-                logger.severe("Rolled back bonus claim blocks for " + player.getName()
-                        + " from " + updated + " to " + bonusBefore + "; refunding "
-                        + items + " item(s)");
-                deliver(player, items, "refund for a failed purchase");
-            }
+            // Throwable, not RuntimeException. savePlayerData's whole body is
+            // `new SavePlayerDataThread(...).start()`, and the realistic way
+            // that fails on a loaded server is OutOfMemoryError from native
+            // thread creation - an Error. The items are already gone by here,
+            // so nothing may skip the unwind. Errors are rethrown once it has
+            // run, rather than swallowed.
+            failure = thrown;
         }
 
-        if (!granted)
+        if (failure == null)
         {
-            return Result.fail("transaction-failed");
+            return Result.ok("bought",
+                    "blocks", blocks, "items", items, "item", settings.currencyName(items));
         }
 
-        return Result.ok("bought",
-                "blocks", blocks, "items", items, "item", settings.currencyName(items));
+        data.setBonusClaimBlocks(rollbackTo);
+        // Refund before logging. The refund is the safety property and the log
+        // is diagnostics; composing the log message allocates, and under the
+        // OutOfMemoryError this path exists for, allocation is exactly what
+        // fails. Ordering them the other way trades the player's items for a
+        // console line.
+        int returned = deliver(player, items, "refund for a failed purchase");
+        logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
+                + "; bonus claim blocks restored to " + bonusBefore + " and "
+                + returned + " of " + items + " item(s) returned", failure);
+
+        if (failure instanceof Error error)
+        {
+            throw error;
+        }
+        return returned < items
+                ? Result.fail("items-lost", "lost", items - returned)
+                : Result.fail("transaction-failed");
     }
 
     Result sell(Player player, int blocks)
@@ -170,12 +179,10 @@ final class BarterService
             return Result.fail("invalid-amount");
         }
 
-        DataStore store = dataStore();
+        DataStore store = dataStore("a sale", player);
         if (store == null)
         {
-            logger.severe("Sale refused for " + player.getName()
-                    + ": GriefPrevention's data store is unavailable");
-            return Result.fail("transaction-failed");
+            return Result.fail("data-unavailable");
         }
 
         UUID playerId = player.getUniqueId();
@@ -210,52 +217,53 @@ final class BarterService
             return Result.fail("amount-too-small", "item", settings.currencyName());
         }
 
-        data.setBonusClaimBlocks(purchased - blocks);
-        boolean removed = false;
+        // Boxed ahead of the write, for the same reason as in buy().
+        Integer rollbackTo = purchased;
+
+        Throwable failure = null;
         try
         {
+            data.setBonusClaimBlocks(purchased - blocks);
             store.savePlayerData(playerId, data);
-            removed = true;
         }
-        catch (RuntimeException failure)
+        catch (Throwable thrown)
         {
-            logger.log(Level.SEVERE, "Sale failed for " + player.getName(), failure);
-        }
-        finally
-        {
-            // In finally for the same reason as buy(): an Error out of
-            // savePlayerData must not leave the deduction standing with nothing
-            // paid out for it.
-            if (!removed)
-            {
-                data.setBonusClaimBlocks(purchased);
-                logger.severe("Rolled back bonus claim blocks for " + player.getName()
-                        + " to " + purchased + "; no items paid out");
-            }
+            failure = thrown;
         }
 
-        if (!removed)
+        if (failure != null)
         {
+            data.setBonusClaimBlocks(rollbackTo);
+            logger.log(Level.SEVERE, "Sale failed for " + player.getName()
+                    + "; bonus claim blocks restored to " + purchased
+                    + ", no items paid out", failure);
+            if (failure instanceof Error error)
+            {
+                throw error;
+            }
             return Result.fail("transaction-failed");
         }
 
-        // Guarded like the refund path. By this point the blocks are deducted
-        // and persisted, so an exception escaping here would cost the player
-        // both the blocks and the items, and would do it with no log line at
-        // all because the command dispatcher only reports a generic error.
-        deliver(player, items, "payout for a sale");
+        // The blocks are deducted and persisted by this point, so a payout that
+        // only partly lands cannot be reported as a completed sale. Saying
+        // "sold" while the items never arrived is the item-loss case
+        // SECURITY.md treats as a vulnerability rather than a bug.
+        int paid = deliver(player, items, "payout for a sale");
+        if (paid < items)
+        {
+            return Result.fail("items-lost", "lost", items - paid);
+        }
+
         return Result.ok("sold",
                 "blocks", blocks, "items", items, "item", settings.currencyName(items));
     }
 
     Result info(Player player)
     {
-        DataStore store = dataStore();
+        DataStore store = dataStore("a rate lookup", player);
         if (store == null)
         {
-            logger.severe("Cannot report rates to " + player.getName()
-                    + ": GriefPrevention's data store is unavailable");
-            return Result.fail("transaction-failed");
+            return Result.fail("data-unavailable");
         }
 
         PlayerData data = store.getPlayerData(player.getUniqueId());
@@ -267,41 +275,84 @@ final class BarterService
     }
 
     /**
-     * GriefPrevention's data store, or null while it is unavailable.
+     * GriefPrevention's data store, or null when it cannot be reached.
      *
      * <p>Both {@code instance} and {@code dataStore} are public mutable fields
      * that GriefPrevention clears as it unloads, so a dereference that was safe
-     * one statement ago can fail in the next. Resolving them once, up front,
-     * turns that from a mid-transaction failure into a refusal.
+     * one statement ago can fail in the next. Resolving them before anything is
+     * taken from the player turns that into a refusal rather than a trade that
+     * has to be unwound.
+     *
+     * <p>It is a narrowing, not a guarantee, and the difference is worth being
+     * precise about. PlayerData loads lazily: getBonusClaimBlocks() calls
+     * loadDataFromSecondaryStorage(), which reads
+     * GriefPrevention.instance.dataStore again on its own. A player whose data
+     * is not cached yet can still fail there, after this check has passed. What
+     * the check does buy is that such a failure happens before any item or
+     * block has moved.
      */
-    private static DataStore dataStore()
+    private DataStore dataStore(String operation, Player player)
     {
         GriefPrevention plugin = GriefPrevention.instance;
-        return plugin == null ? null : plugin.dataStore;
+        DataStore store = plugin == null ? null : plugin.dataStore;
+        if (store == null)
+        {
+            logger.severe("Refused " + operation + " for " + player.getName()
+                    + ": GriefPrevention's data store is unavailable");
+        }
+        return store;
     }
 
     /**
-     * Hands items to a player as part of a trade that must not fail further.
+     * Hands items to a player, dropping at their feet whatever will not fit,
+     * and returns how many actually arrived.
      *
-     * <p>Guarded because {@link #giveCurrency} can throw on the way out: it
-     * drops whatever will not fit through the world, which fires ItemSpawnEvent
-     * synchronously into other plugins' listeners. Letting that escape would
-     * replace the configured message with Bukkit's generic internal error and
-     * abandon the rest of the unwind, so the failure is logged loudly instead
-     * and names the amount an operator has to restore by hand.
+     * <p>Dropping fires ItemSpawnEvent synchronously into other plugins'
+     * listeners, so this can fail partway through a large payout. It is caught
+     * here rather than allowed to escape: the caller is either unwinding a
+     * failed trade or has already persisted the blocks, and in both cases an
+     * escaping exception would replace the configured message with Bukkit's
+     * generic internal error and lose the record of what was owed.
+     *
+     * <p>The count returned is what the caller reports. Reporting the amount
+     * requested instead would send an operator to restore items the player had
+     * already received, turning an item loss into item duplication.
      */
-    private void deliver(Player player, int items, String context)
+    private int deliver(Player player, int amount, String context)
     {
+        int maxStack = settings.currency().getMaxStackSize();
+        int delivered = 0;
         try
         {
-            giveCurrency(player, items);
+            int remaining = amount;
+            while (remaining > 0)
+            {
+                int size = Math.min(remaining, maxStack);
+                remaining -= size;
+                Map<Integer, ItemStack> leftover =
+                        player.getInventory().addItem(new ItemStack(settings.currency(), size));
+                int notStored = 0;
+                for (ItemStack drop : leftover.values())
+                {
+                    notStored += drop.getAmount();
+                }
+                // Whatever addItem did not hand back is in the inventory.
+                delivered += size - notStored;
+                for (ItemStack drop : leftover.values())
+                {
+                    player.getWorld().dropItemNaturally(player.getLocation(), drop);
+                    delivered += drop.getAmount();
+                }
+            }
         }
         catch (RuntimeException failure)
         {
-            logger.log(Level.SEVERE, "Could not hand " + items + " item(s) to "
-                    + player.getName() + " as a " + context
-                    + "; they are lost and must be restored by hand", failure);
+            logger.log(Level.SEVERE, "Handing " + amount + " item(s) to " + player.getName()
+                    + " as a " + context + " stopped after " + delivered
+                    + "; the remaining " + (amount - delivered)
+                    + " are lost and must be restored by hand", failure);
         }
+        return delivered;
     }
 
     /**
@@ -358,23 +409,5 @@ final class BarterService
             }
         }
         inventory.setStorageContents(contents);
-    }
-
-    /** Hands items back, dropping at the player's feet whatever will not fit. */
-    private void giveCurrency(Player player, int amount)
-    {
-        int maxStack = settings.currency().getMaxStackSize();
-        int remaining = amount;
-        while (remaining > 0)
-        {
-            int size = Math.min(remaining, maxStack);
-            remaining -= size;
-            Map<Integer, ItemStack> leftover =
-                    player.getInventory().addItem(new ItemStack(settings.currency(), size));
-            for (ItemStack drop : leftover.values())
-            {
-                player.getWorld().dropItemNaturally(player.getLocation(), drop);
-            }
-        }
     }
 }
