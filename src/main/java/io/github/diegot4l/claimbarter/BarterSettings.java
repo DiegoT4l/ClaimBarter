@@ -9,10 +9,13 @@ import java.util.Locale;
  * An immutable snapshot of config.yml, rebuilt on every reload.
  *
  * <p>Every value is validated here rather than at the point of use, so a bad
- * configuration fails loudly at load instead of halfway through a trade.
+ * configuration fails loudly at load instead of halfway through a trade. The
+ * two currency names are resolved here for the same reason: they are derived
+ * once from a validated material, not recomputed per message.
  */
 record BarterSettings(
         Material currency,
+        String currencySingular,
         String currencyPlural,
         int blocksPerItem,
         boolean sellingEnabled,
@@ -39,13 +42,24 @@ record BarterSettings(
             throw new InvalidSettingException("currency.item", itemName + " is not an obtainable item");
         }
 
+        // getString with a non-null default never returns null: it falls back
+        // to the default both when the key is absent and when it is YAML null.
+        String configuredPlural = config.getString("currency.item-plural", "").strip();
+        if (configuredPlural.indexOf('&') >= 0 || configuredPlural.indexOf('§') >= 0)
+        {
+            // Every other setting rejects a value it cannot honour, and this one
+            // is spliced into a message that is then read by the legacy colour
+            // serializer. An ampersand there would be eaten along with the
+            // character after it, silently truncating the item name mid-word and
+            // bleeding a colour into the rest of the line.
+            throw new InvalidSettingException("currency.item-plural", "must not contain colour codes");
+        }
         // Resolved here rather than defaulted in config.yml so that a server
         // which changes currency.item cannot be left describing a different
         // item than the one it charges.
-        String configuredPlural = config.getString("currency.item-plural", "");
-        String currencyPlural = configuredPlural == null || configuredPlural.isBlank()
+        String currencyPlural = configuredPlural.isEmpty()
                 ? derivedPlural(currency)
-                : configuredPlural.trim();
+                : configuredPlural;
 
         int blocksPerItem = config.getInt("currency.blocks-per-item", 100);
         if (blocksPerItem <= 0)
@@ -67,6 +81,7 @@ record BarterSettings(
 
         return new BarterSettings(
                 currency,
+                displayName(currency),
                 currencyPlural,
                 blocksPerItem,
                 config.getBoolean("selling.enabled", true),
@@ -77,7 +92,7 @@ record BarterSettings(
     /** The configured item's name, lower-cased and spaced, for use in messages. */
     String currencyName()
     {
-        return displayName(currency);
+        return currencySingular;
     }
 
     /**
@@ -88,10 +103,14 @@ record BarterSettings(
      * {@link #currencyName()} where the template does: "a single {item}" and
      * "1 {item}" are the message's own singular, not a count this class knows
      * about.
+     *
+     * <p>A template carrying two live counts can only agree with one of them.
+     * {@code not-enough-items} is the only such template, and {@code {item}}
+     * sits next to {@code {needed}}, which is the count passed here.
      */
     String currencyName(int count)
     {
-        return count == 1 ? currencyName() : currencyPlural;
+        return count == 1 ? currencySingular : currencyPlural;
     }
 
     private static String displayName(Material material)
@@ -100,23 +119,39 @@ record BarterSettings(
     }
 
     /**
-     * Appends an "s" unless the name already ends in one.
+     * Guesses the plural of a material name, as a default for the server that
+     * has not set {@code currency.item-plural}.
      *
-     * <p>That is a convenience, not a rule, and it is wrong in both directions.
-     * Minecraft materials are full of mass nouns (redstone, gunpowder, sand)
-     * where appending anything reads wrong, and of singulars that already end
-     * in "s" and still take a plural — ten of COMPASS are "compasses", not
-     * "compass".
+     * <p>Two of the three rules here are mechanical and safe. A name ending in
+     * a sibilant takes "-es" (torch becomes torches, brush becomes brushes,
+     * shulker box becomes boxes), and anything else takes a plain "-s".
      *
-     * <p>No rule over the characters can separate those two cases: "glass" and
-     * "compass" end identically and differ only in the dictionary, which this
-     * plugin has no business shipping. {@code currency.item-plural} is the
-     * escape hatch for either, and the derivation is only ever a default for
-     * the server that has not set one.
+     * <p>The third case cannot be decided from the characters. A name already
+     * ending in "s" may be a plural already, a mass noun, or a singular that
+     * still inflects: "glass" and "compass" end identically and differ only in
+     * a dictionary this plugin has no business shipping. Those are left
+     * untouched, which is right for glass and wrong for compass.
+     *
+     * <p>Two smaller classes are also left alone deliberately, because their
+     * rules have common exceptions: names ending in "o" (potato wants
+     * potatoes, bamboo does not want bambooes) and in "f" (bookshelf wants
+     * bookshelves, but roof wants roofs). Mass nouns such as redstone and
+     * gunpowder are wrong under any suffix rule at all.
+     *
+     * <p>{@code currency.item-plural} is the escape hatch for every one of
+     * those, and a server using such an item as currency should set it.
      */
     private static String derivedPlural(Material material)
     {
         String name = displayName(material);
-        return name.endsWith("s") ? name : name + "s";
+        if (name.endsWith("ch") || name.endsWith("sh") || name.endsWith("x") || name.endsWith("z"))
+        {
+            return name + "es";
+        }
+        if (name.endsWith("s"))
+        {
+            return name;
+        }
+        return name + "s";
     }
 }

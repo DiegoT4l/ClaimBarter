@@ -14,13 +14,20 @@ currency:
   #
   # Left empty, the plural is derived from currency.item, so changing the item
   # cannot leave the messages describing a different one. The derivation adds
-  # an "s" unless the name already ends in one, which reads wrong in two cases.
-  # Set it explicitly for either:
+  # "es" after a sibilant (TORCH -> torches, SHULKER_BOX -> shulker boxes) and
+  # a plain "s" otherwise. Set this explicitly when that guess is wrong:
   #
   #   - A mass noun, where any suffix is wrong: REDSTONE wants "redstone",
   #     not "redstones".
   #   - A name already ending in "s" that still takes a plural: COMPASS wants
-  #     "compasses", not "compass".
+  #     "compasses". Names ending in "s" are left untouched, because nothing
+  #     in the spelling separates COMPASS from GLASS.
+  #   - A name ending in "o" or "f", where the rule has common exceptions:
+  #     POTATO wants "potatoes" and BOOKSHELF wants "bookshelves", but BAMBOO
+  #     does not want "bambooes".
+  #
+  # Colour codes are rejected here: this is spliced into a message that is then
+  # read by the colour serializer, where a stray & would eat the next character.
   item-plural: ""
 
   # Claim blocks granted per item handed over.
@@ -41,6 +48,18 @@ limits:
   # 0 means no ceiling.
   max-purchased-blocks: 0
 
+# Every player-facing string. Placeholders in {braces} are substituted by the
+# plugin; anything else is literal.
+#
+# {item} is count-aware. Where the plugin supplies the number, it renders the
+# singular at 1 and currency.item-plural above 1, so "{items} {item}" reads
+# "10 iron ingots" on its own. Do NOT add your own "s" after it: a template
+# written as "{item}s" to work around older versions now renders "ingotss".
+# Where the template supplies the number itself ("a single {item}", "1 {item}"),
+# {item} stays singular.
+#
+# In not-enough-items, {item} agrees with {needed}, the count it is printed
+# next to. Moving it beside {have} will make it disagree.
 messages:
   prefix: "&8[&bClaimBarter&8] &r"
   bought: "&aBought &f{blocks} &aclaim blocks for &f{items} {item}&a."

@@ -74,6 +74,12 @@ limits:
 
 Every message is in `config.yml` under `messages:` and uses `&` colour codes.
 
+The `{item}` placeholder agrees with the count printed next to it: singular at
+one, `currency.item-plural` above one. `saveDefaultConfig()` never overwrites an
+existing `config.yml`, so **if you previously wrote `{item}s` in a message to
+work around the missing plural, remove that `s`** — it now renders `ingotss`.
+Untouched messages need no change.
+
 Bad values are refused at load with a specific reason in the console, and the
 plugin disables itself rather than running on a configuration it cannot honour.
 
