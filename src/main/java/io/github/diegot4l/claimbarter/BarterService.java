@@ -3,7 +3,6 @@ package io.github.diegot4l.claimbarter;
 import me.ryanhamshire.GriefPrevention.DataStore;
 import me.ryanhamshire.GriefPrevention.GriefPrevention;
 import me.ryanhamshire.GriefPrevention.PlayerData;
-import org.bukkit.Location;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -120,9 +119,15 @@ final class BarterService
         removeCurrency(inventory, items);
 
         Throwable failure = null;
+        boolean granted = false;
         try
         {
             data.setBonusClaimBlocks((int) updated);
+            // Set the instant the write lands, because the rollback below is
+            // relative and must not undo a grant that never happened.
+            // setBonusClaimBlocks takes an Integer, so this line autoboxes and
+            // can itself fail under the OutOfMemoryError the catch is for.
+            granted = true;
             // GriefPrevention does not persist on its own. DataStore.java:1031 is
             // explicit: "MUST be called after you're done making changes,
             // otherwise a reload will lose them."
@@ -145,17 +150,29 @@ final class BarterService
                     "blocks", blocks, "items", items, "item", settings.currencyName(items));
         }
 
-        // Subtracts this purchase's own grant rather than writing back the
-        // total read at the top. PlayerData is GriefPrevention's live shared
-        // object, and between that read and here an operator's
-        // /adjustbonusclaimblocks or another plugin may have credited the same
-        // pool. Restoring the absolute snapshot would erase it.
-        data.setBonusClaimBlocks(data.getBonusClaimBlocks() - (int) blocks);
-        // Completing the undo comes before the refund, because minting blocks
-        // is the worse half of the trade to leave behind. Both come before the
-        // log, which is diagnostics.
-        persistRollback(store, playerId, data, player);
+        if (granted)
+        {
+            // Subtracts this purchase's own grant rather than writing back the
+            // total read at the top. PlayerData is GriefPrevention's live
+            // shared object, and between that read and here an operator's
+            // /adjustbonusclaimblocks or another plugin may have credited the
+            // same pool; restoring the absolute snapshot would erase it.
+            //
+            // Guarded by the flag because a relative undo is only correct if
+            // the grant landed. Applied unconditionally, a failure in the
+            // setter itself would subtract blocks that were never added and
+            // leave the player below where they started.
+            data.setBonusClaimBlocks(data.getBonusClaimBlocks() - (int) blocks);
+        }
+        // The refund runs before the durable write. The in-memory undo above
+        // has already stopped this session from minting anything; persisting
+        // it is a rarer correction, and it must not be what stands between the
+        // player and the items already taken from them.
         int returned = deliver(player, items, "refund for a failed purchase");
+        if (granted)
+        {
+            persistRollback(store, playerId, data, player);
+        }
         logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
                 + "; took back the " + blocks + " claim blocks granted and returned "
                 + returned + " of " + items + " item(s)", failure);
@@ -223,9 +240,13 @@ final class BarterService
         }
 
         Throwable failure = null;
+        boolean deducted = false;
         try
         {
             data.setBonusClaimBlocks(purchased - blocks);
+            // As in buy(): the relative undo below is only correct if this
+            // autoboxing write actually landed.
+            deducted = true;
             store.savePlayerData(playerId, data);
         }
         catch (Throwable thrown)
@@ -235,10 +256,15 @@ final class BarterService
 
         if (failure != null)
         {
-            // Adds this sale's own deduction back, rather than writing the
-            // snapshot, for the same reason as buy().
-            data.setBonusClaimBlocks(data.getBonusClaimBlocks() + blocks);
-            persistRollback(store, playerId, data, player);
+            if (deducted)
+            {
+                // Adds this sale's own deduction back, rather than writing the
+                // snapshot, for the same reason as buy(). Applied without the
+                // flag, a failure in the setter itself would credit blocks that
+                // were never taken - free claim blocks out of a failed sale.
+                data.setBonusClaimBlocks(data.getBonusClaimBlocks() + blocks);
+                persistRollback(store, playerId, data, player);
+            }
             logger.log(Level.SEVERE, "Sale failed for " + player.getName()
                     + "; gave back the " + blocks + " claim blocks deducted"
                     + ", no items paid out", failure);
@@ -377,9 +403,6 @@ final class BarterService
     private int deliver(Player player, int amount, String context)
     {
         int maxStack = settings.currency().getMaxStackSize();
-        // The player cannot move during a synchronous command, so this is
-        // resolved once rather than per dropped stack.
-        Location where = player.getLocation();
         int delivered = 0;
         boolean threw = false;
         try
@@ -400,7 +423,12 @@ final class BarterService
                 delivered += size - notStored;
                 for (ItemStack drop : leftover.values())
                 {
-                    Item dropped = player.getWorld().dropItemNaturally(where, drop);
+                    // Re-read per drop: dropItemNaturally fires ItemSpawnEvent
+                    // synchronously, and a listener is free to teleport the
+                    // player, so a location cached before the loop can end up
+                    // in another region or another world entirely.
+                    Item dropped = player.getWorld()
+                            .dropItemNaturally(player.getLocation(), drop);
                     if (dropped.isValid())
                     {
                         delivered += drop.getAmount();
