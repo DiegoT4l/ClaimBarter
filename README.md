@@ -61,6 +61,7 @@ silently charges two ingots and pockets the difference.
 ```yaml
 currency:
   item: IRON_INGOT       # any obtainable Material
+  item-plural: ""        # empty derives it; set it for "redstone" or "compasses"
   blocks-per-item: 100   # 100 blocks is a 10x10 area
 
 selling:
@@ -72,6 +73,12 @@ limits:
 ```
 
 Every message is in `config.yml` under `messages:` and uses `&` colour codes.
+
+The `{item}` placeholder agrees with the count printed next to it: singular at
+one, `currency.item-plural` above one. `saveDefaultConfig()` never overwrites an
+existing `config.yml`, so **if you previously wrote `{item}s` in a message to
+work around the missing plural, remove that `s`** — it now renders `ingotss`.
+Untouched messages need no change.
 
 Bad values are refused at load with a specific reason in the console, and the
 plugin disables itself rather than running on a configuration it cannot honour.

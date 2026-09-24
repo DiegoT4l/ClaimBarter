@@ -131,7 +131,7 @@ limits:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `currency.item` | `IRON_INGOT` | Any obtainable `Material`. Air and non-items are refused. |
-| `currency.item-plural` | *(derived)* | Name used next to a count above one. Empty derives it from `currency.item`, so changing the item cannot leave the messages describing a different one. Set it explicitly for a mass noun: `REDSTONE` wants `redstone`, not `redstones`. |
+| `currency.item-plural` | *(derived)* | Name used next to a count above one. Empty derives it from `currency.item`, so changing the item cannot leave the messages describing a different one. The guess handles sibilants (`TORCH` → `torches`) and consonant + `y` (`POPPY` → `poppies`). Set it explicitly for a mass noun (`REDSTONE` wants `redstone`), a name already ending in `s` (`COMPASS` wants `compasses`), or one ending in `o` or `f` (`POTATO` wants `potatoes`). |
 | `currency.blocks-per-item` | `100` | Claim blocks granted per item. 100 blocks is a 10×10 claim. |
 | `selling.enabled` | `true` | `false` makes claim blocks a one-way purchase. |
 | `selling.refund-ratio` | `0.5` | Fraction of the purchase price returned on a sale. Must be `0.0`–`1.0`. |
@@ -141,6 +141,13 @@ limits:
 > `max-purchased-blocks` caps the **whole bonus pool**, including blocks an
 > operator granted with `/adjustbonusclaimblocks` — ClaimBarter has no separate
 > store of its own.
+
+> [!WARNING]
+> **Upgrading and you edited your messages?** `{item}` now matches the count
+> printed beside it. If you previously wrote `{item}s` in a message to work
+> around the missing plural, remove that trailing `s` or it will render
+> `ingotss`. The plugin logs a warning at startup for every message it finds in
+> that shape. Untouched messages need no change.
 
 > [!IMPORTANT]
 > Bad values are refused at load, not at the point of use. `currency.item` must
