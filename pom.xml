@@ -32,7 +32,7 @@
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
             <!-- Paper dropped the -R0.1-SNAPSHOT scheme; 26.x publishes per-build. -->
-            <version>26.2.build.123-stable</version>
+            <version>26.2.build.126-stable</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
