@@ -61,6 +61,7 @@ silently charges two ingots and pockets the difference.
 ```yaml
 currency:
   item: IRON_INGOT       # any obtainable Material
+  item-plural: ""        # empty derives it; set it for "redstone" or "compasses"
   blocks-per-item: 100   # 100 blocks is a 10x10 area
 
 selling:

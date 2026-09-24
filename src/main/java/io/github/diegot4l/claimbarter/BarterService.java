@@ -57,7 +57,7 @@ final class BarterService
         if (held < items)
         {
             return Result.fail("not-enough-items",
-                    "needed", items, "have", held, "item", settings.currencyName());
+                    "needed", items, "have", held, "item", settings.currencyName(items));
         }
 
         // Widened to long so the ceiling checks below cannot themselves overflow.
@@ -92,7 +92,7 @@ final class BarterService
         }
 
         return Result.ok("bought",
-                "blocks", blocks, "items", items, "item", settings.currencyName());
+                "blocks", blocks, "items", items, "item", settings.currencyName(items));
     }
 
     Result sell(Player player, int blocks)
@@ -144,7 +144,7 @@ final class BarterService
 
         giveCurrency(player, items);
         return Result.ok("sold",
-                "blocks", blocks, "items", items, "item", settings.currencyName());
+                "blocks", blocks, "items", items, "item", settings.currencyName(items));
     }
 
     Result info(Player player)

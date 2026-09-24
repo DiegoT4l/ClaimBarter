@@ -9,6 +9,20 @@ currency:
   # enchantments, no custom model data. See "Known limitations" in the README.
   item: IRON_INGOT
 
+  # Plural form of the item name, used in messages next to a count greater
+  # than one: "Bought 1000 claim blocks for 10 iron ingots."
+  #
+  # Left empty, the plural is derived from currency.item, so changing the item
+  # cannot leave the messages describing a different one. The derivation adds
+  # an "s" unless the name already ends in one, which reads wrong in two cases.
+  # Set it explicitly for either:
+  #
+  #   - A mass noun, where any suffix is wrong: REDSTONE wants "redstone",
+  #     not "redstones".
+  #   - A name already ending in "s" that still takes a plural: COMPASS wants
+  #     "compasses", not "compass".
+  item-plural: ""
+
   # Claim blocks granted per item handed over.
   # 100 blocks is a 10x10 area.
   blocks-per-item: 100

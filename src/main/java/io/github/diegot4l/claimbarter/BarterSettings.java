@@ -3,6 +3,8 @@ package io.github.diegot4l.claimbarter;
 import org.bukkit.Material;
 import org.bukkit.configuration.file.FileConfiguration;
 
+import java.util.Locale;
+
 /**
  * An immutable snapshot of config.yml, rebuilt on every reload.
  *
@@ -11,6 +13,7 @@ import org.bukkit.configuration.file.FileConfiguration;
  */
 record BarterSettings(
         Material currency,
+        String currencyPlural,
         int blocksPerItem,
         boolean sellingEnabled,
         double refundRatio,
@@ -36,6 +39,14 @@ record BarterSettings(
             throw new InvalidSettingException("currency.item", itemName + " is not an obtainable item");
         }
 
+        // Resolved here rather than defaulted in config.yml so that a server
+        // which changes currency.item cannot be left describing a different
+        // item than the one it charges.
+        String configuredPlural = config.getString("currency.item-plural", "");
+        String currencyPlural = configuredPlural == null || configuredPlural.isBlank()
+                ? derivedPlural(currency)
+                : configuredPlural.trim();
+
         int blocksPerItem = config.getInt("currency.blocks-per-item", 100);
         if (blocksPerItem <= 0)
         {
@@ -56,6 +67,7 @@ record BarterSettings(
 
         return new BarterSettings(
                 currency,
+                currencyPlural,
                 blocksPerItem,
                 config.getBoolean("selling.enabled", true),
                 refundRatio,
@@ -65,6 +77,46 @@ record BarterSettings(
     /** The configured item's name, lower-cased and spaced, for use in messages. */
     String currencyName()
     {
-        return currency.name().toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
+        return displayName(currency);
+    }
+
+    /**
+     * The currency name inflected for the count it will be printed next to, so
+     * a message reads "for 10 iron ingots" rather than "for 10 iron ingot".
+     *
+     * <p>Use this where the plugin supplies the number, and the no-argument
+     * {@link #currencyName()} where the template does: "a single {item}" and
+     * "1 {item}" are the message's own singular, not a count this class knows
+     * about.
+     */
+    String currencyName(int count)
+    {
+        return count == 1 ? currencyName() : currencyPlural;
+    }
+
+    private static String displayName(Material material)
+    {
+        return material.name().toLowerCase(Locale.ROOT).replace('_', ' ');
+    }
+
+    /**
+     * Appends an "s" unless the name already ends in one.
+     *
+     * <p>That is a convenience, not a rule, and it is wrong in both directions.
+     * Minecraft materials are full of mass nouns (redstone, gunpowder, sand)
+     * where appending anything reads wrong, and of singulars that already end
+     * in "s" and still take a plural — ten of COMPASS are "compasses", not
+     * "compass".
+     *
+     * <p>No rule over the characters can separate those two cases: "glass" and
+     * "compass" end identically and differ only in the dictionary, which this
+     * plugin has no business shipping. {@code currency.item-plural} is the
+     * escape hatch for either, and the derivation is only ever a default for
+     * the server that has not set one.
+     */
+    private static String derivedPlural(Material material)
+    {
+        String name = displayName(material);
+        return name.endsWith("s") ? name : name + "s";
     }
 }
