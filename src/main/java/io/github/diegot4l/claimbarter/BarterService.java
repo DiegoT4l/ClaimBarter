@@ -66,8 +66,8 @@ final class BarterService
         long blocks = (long) items * settings.blocksPerItem();
         UUID playerId = player.getUniqueId();
         PlayerData data = GriefPrevention.instance.dataStore.getPlayerData(playerId);
-        int purchased = data.getBonusClaimBlocks();
-        long updated = (long) purchased + blocks;
+        int bonusBefore = data.getBonusClaimBlocks();
+        long updated = (long) bonusBefore + blocks;
 
         if (updated > Integer.MAX_VALUE)
         {
@@ -89,18 +89,26 @@ final class BarterService
         }
         catch (RuntimeException failure)
         {
-            // Not the disk-failure path: savePlayerData starts a thread and
-            // returns, and FlatFileDataStore swallows the write's own failure,
-            // so an I/O error never arrives here. What does arrive is the
-            // dataStore going away mid-tick. PlayerData is GriefPrevention's
-            // live cached object, so without this the grant above would outlive
-            // the failure and a later save would persist blocks nobody paid
-            // for. Undone before the refund because this cannot throw and
-            // minting is the worse half of the trade to leave behind, and
-            // because sell() unwinds in the same order.
-            data.setBonusClaimBlocks(purchased);
+            // Not the disk-failure path. In GriefPrevention 16.18.7,
+            // DataStore.savePlayerData only starts a SavePlayerDataThread and
+            // returns, and FlatFileDataStore.overrideSavePlayerData wraps its
+            // write in catch (Exception), so an I/O error never arrives here.
+            // What does arrive is the dataStore going away mid-tick.
+            //
+            // PlayerData is GriefPrevention's live cached object, so the grant
+            // is undone first: left in place, a later save would persist blocks
+            // nobody paid for. Minting is the worse half of the trade to leave
+            // behind, and sell() unwinds in the same order.
+            data.setBonusClaimBlocks(bonusBefore);
+            // Logged before the refund because giveCurrency can itself throw:
+            // it drops whatever will not fit through the world, firing
+            // ItemSpawnEvent synchronously. If that escapes, this line is the
+            // only record an operator will ever have of the failed purchase.
+            logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
+                    + "; restored bonus claim blocks from " + updated + " to " + bonusBefore
+                    + " and refunded " + items + " item(s)", failure);
+            repersist(playerId, data, player.getName(), updated);
             giveCurrency(player, items);
-            logger.log(Level.SEVERE, "Purchase failed for " + player.getName() + "; items refunded", failure);
             return Result.fail("transaction-failed");
         }
 
@@ -158,8 +166,14 @@ final class BarterService
         }
         catch (RuntimeException failure)
         {
+            // Same reasoning as buy(): the live object is corrected first, then
+            // re-persisted, because an in-flight save may already have written
+            // the reduced total to disk while nothing was paid out for it.
             data.setBonusClaimBlocks(purchased);
-            logger.log(Level.SEVERE, "Sale failed for " + player.getName() + "; no items paid out", failure);
+            logger.log(Level.SEVERE, "Sale failed for " + player.getName()
+                    + "; restored bonus claim blocks to " + purchased
+                    + ", no items paid out", failure);
+            repersist(playerId, data, player.getName(), (long) purchased - blocks);
             return Result.fail("transaction-failed");
         }
 
@@ -176,6 +190,36 @@ final class BarterService
                 "blocks", settings.blocksPerItem(),
                 "purchased", data.getBonusClaimBlocks(),
                 "available", data.getRemainingClaimBlocks());
+    }
+
+    /**
+     * Best-effort re-save after a rollback has corrected the live object.
+     *
+     * <p>Restoring the in-memory total is not enough on its own. A save thread
+     * started before the failure reads the live object when it serializes
+     * rather than capturing a value up front: in GriefPrevention 16.18.7,
+     * FlatFileDataStore.overrideSavePlayerData calls getBonusClaimBlocks() at
+     * write time. So the abandoned total may already be on disk while memory
+     * now holds the correct one, and nothing else would ever reconcile the
+     * two - the player's file wins after a restart.
+     *
+     * <p>This usually fails for the same reason the first save did, which is
+     * why it is best effort. The failure is logged with the value that may be
+     * stranded on disk rather than rethrown, because the caller is already
+     * unwinding a trade and a second exception would abandon the refund.
+     */
+    private void repersist(UUID playerId, PlayerData data, String playerName, long abandoned)
+    {
+        try
+        {
+            GriefPrevention.instance.dataStore.savePlayerData(playerId, data);
+        }
+        catch (RuntimeException unrecoverable)
+        {
+            logger.log(Level.SEVERE, "Could not re-save " + playerName
+                    + " after rolling back a trade; the file on disk may still hold "
+                    + abandoned + " bonus claim blocks", unrecoverable);
+        }
     }
 
     /**
