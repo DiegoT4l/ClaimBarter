@@ -14,8 +14,9 @@ currency:
   #
   # Left empty, the plural is derived from currency.item, so changing the item
   # cannot leave the messages describing a different one. The derivation adds
-  # "es" after a sibilant (TORCH -> torches, SHULKER_BOX -> shulker boxes) and
-  # a plain "s" otherwise. Set this explicitly when that guess is wrong:
+  # "es" after a sibilant (TORCH -> torches, SHULKER_BOX -> shulker boxes),
+  # turns a consonant plus "y" into "ies" (POPPY -> poppies, but CLAY -> clays),
+  # and adds a plain "s" otherwise. Set this explicitly when that guess is wrong:
   #
   #   - A mass noun, where any suffix is wrong: REDSTONE wants "redstone",
   #     not "redstones".

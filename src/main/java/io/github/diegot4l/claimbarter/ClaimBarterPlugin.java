@@ -65,7 +65,7 @@ public final class ClaimBarterPlugin extends JavaPlugin
             getLogger().severe(badValue.getMessage());
             return false;
         }
-        messages = new Messages(getConfig().getConfigurationSection("messages"));
+        messages = new Messages(getConfig().getConfigurationSection("messages"), getLogger());
         service = new BarterService(settings, getLogger());
         return true;
     }
