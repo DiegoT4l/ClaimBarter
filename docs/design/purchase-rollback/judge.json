@@ -1,0 +1,688 @@
+{
+ "chosen_design": "explicit-state-ledger",
+ "rationale": "Fewest hard-invariant breaks (3) and fewest broken votes (2) in the tally, and on inspection two of its three hard breaks are the GriefPrevention 16.18.7 API ceiling that ALL four designs carry identically: a player-data write whose failure is swallowed (verified: FlatFileDataStore.overrideSavePlayerData exception table 13..108 -> 111 catches java.lang.Exception, Files.write at offset 105 inside it, method not synchronized) turns a successful buy into item loss and a successful sell into duplication after a restart, and no DataStore API reports it. Only ONE of its hard breaks was repairable in-file: the U4 summary printed 'Nothing is left to fix by hand' after a successful persistRollback even though an in-flight GP writer may have serialized the abandoned total, i.e. a false all-clear in exactly the branch where the operator needed the warning. That is fixed by graft G3 below. Design 4 (6 hard) and Design 2 (5 hard) both carried more, Design 2 by adding an unverifiable getStorageContents/clone dependency and Design 4 by adding a new message key (reopens #15/#16). Design 1 (4 hard) deleted the unwind entirely and reproduced the disqualifying #1-#17 shape under a compounding OOM.  I re-verified every bytecode fact this spec rests on rather than trusting the brief: setBonusClaimBlocks(Integer) is aload_0/aload_1/putfield/return (pre-boxing makes the mutation infallible); PlayerData.claims is assigned in exactly two places, the constructor (null) and getClaims offset 15, and the fix-negative write to bonusClaimBlocks at offset 428 sits inside the claims==null branch, so warming getClaims() on the main thread provably removes every SavePlayerDataThread this plugin starts from the set of bonus-pool WRITERS (DataStore$SavePlayerDataThread.run calls getAccruedClaimBlocks/getClaims/asyncSavePlayerData and nothing else); DataStore.savePlayerData is new SavePlayerDataThread(...).start() and nothing more; no aconst_null is ever stored to GriefPrevention.instance or .dataStore anywhere in the jar. I also corrected one API claim the designs disagreed on: Player.isConnected() DOES exist (inherited from org.bukkit.OfflinePlayer in paper-api 26.2), so the kick guard is implementable.",
+ "grafted_from_others": [
+  "G1 WARM HELPER (from 'Measured Unwind' B4/S3, generalised): one warmClaimData() that forces the lazy load and getClaims() on the main thread BEFORE the pool snapshot, returns the post-warm pool, and WARNs if the warm itself moved it. Used by buy, sell AND info. Verified payoff: after the warm, claims is non-null for that PlayerData's lifetime (only two writers of the field exist), so every later getClaims() - including the one inside SavePlayerDataThread.run and inside savePlayerDataSync - returns at offset 4 and can never re-enter the fix-negative branch that writes bonusClaimBlocks at offset 428. It also structurally kills the stale-purchased-beside-post-fix-available defect in info() and sell() without needing a read-order rule, and closes the info() auditability gap. Does not reopen #13: it is documented as a narrowing, not an NPE guarantee.",
+  "G2 SUCCESS-PATH POOL CANARY (from 'Measured Unwind' B10/S9), at WARNING not SEVERE: after the save thread is started, re-read the pool; if it is not the value just written, log both numbers. Costs one getfield, makes a future GriefPrevention that adds an off-thread writer visible on the first server that runs it instead of silently.",
+  "G3 HONEST DISK WORDING + COMPOSITIONAL HAND-FIX (from the attackers on explicit-state-ledger scenario 1 and on 'Measured Unwind' operator-lens scenario 2, plus 'Pre-committed unwind' persistRollback wording): (a) never print 'Nothing is left to fix by hand' when a pool mutation was applied - a verify-the-file clause naming the exact value and the exact /adjustbonusclaimblocks command is ALWAYS appended in that case; (b) the summary emits EVERY applicable hand-fix clause joined together, never the first matching one, so an item shortfall can no longer suppress the pool-verification clause; (c) a persistRollback that returns normally is described as 'the synchronous write returned; GriefPrevention swallows write failures, so this does not confirm what the file holds' and never as 'written'. This closes explicit-state-ledger's only repairable hard break and strictly reduces what the log claims, so it cannot reopen #3.",
+  "G4 CAPPED DROP ACCOUNTING - settles a direct disagreement between attackers. The Design-1 attacker demanded drop.getAmount() captured BEFORE the drop (a shrinking listener then causes silent loss); the Design-4 design read entity.getItemStack().getAmount() AFTER (a merging listener then inflates the count and can mask a later destroyed stack - review #6 class). The spec credits Math.min(handedOverBeforeTheCall, amountHeldByTheValidEntityAfterTheCall), which is the only choice that fails in neither direction. #6 stays closed (a cancelled spawn still counts 0 via isValid()); #12 stays closed (the inventory diff still counts what a THROWING addItem placed).",
+  "G5 KICK GUARD (from 'Measured Unwind' deliver): player.isConnected() is checked before each payout chunk - verified to exist, inherited from org.bukkit.OfflinePlayer. The loop stops and the un-attempted remainder is reported truthfully lost, instead of being pushed into an inventory object the player may never see and counted as delivered.",
+  "G6 RECOUNT IMMEDIATELY BEFORE THE TAKE (from 'Measured Unwind' B7): the diff that measures itemsTaken is anchored on a count taken in the PREPARE step, not on the refusal count from the top of the method, so nothing that happened during the warm's main-thread file read is attributed to the plugin.",
+  "G7 PRE-MUTATION POOL RECHECK (from 'Pre-committed unwind' B6/S6 compare-before-commit, moved strictly earlier): the pool is re-read at the END of PREPARE, before the first mutation. A mismatch is a refusal, not a rollback - so it can never leave state and cannot reopen #8 (nothing absolute is ever written on a moved pool). After the warm this branch is unreachable against 16.18.7.",
+  "G8 blocks > Integer.MAX_VALUE guard (from 'Pre-committed unwind' B3): a legitimately negative bonus pool (GriefPrevention's own /sellclaimblocks and /adjustbonusclaimblocks can create one) lets blocks exceed int range while updated does not, and the relative undo subtracts (int) blocks. Refused with the EXISTING overflow key - no new key."
+ ],
+ "final_spec": {
+  "buy_steps": [
+   "B1 REFUSE: if (items <= 0) return Result.fail(\"invalid-amount\"). Nothing read, nothing moved.",
+   "B2 COUNT FOR REFUSAL: PlayerInventory inventory = player.getInventory(); int held = countCurrency(inventory). if (held < items) return Result.fail(\"not-enough-items\", \"needed\", items, \"have\", held, \"item\", settings.currencyName(items)).",
+   "B3 STORE: DataStore store = dataStore(\"a purchase\", player); if (store == null) return Result.fail(\"data-unavailable\"). Guard and WARNING kept verbatim; only its javadoc changes (see javadoc_claims_allowed).",
+   "B4 RESOLVE: long blocks = (long) items * settings.blocksPerItem(); UUID playerId = player.getUniqueId(); PlayerData data = store.getPlayerData(playerId). Held in a local for the whole call and NEVER re-fetched (clearCachedPlayerData can orphan a later fetch).",
+   "B5 WARM: int bonusBefore = warmClaimData(data, player, \"a purchase\"). Helper body: int before = data.getBonusClaimBlocks(); data.getClaims(); int after = data.getBonusClaimBlocks(); if (after != before) logger.warning(\"GriefPrevention corrected \" + player.getName() + \"'s bonus pool from \" + before + \" to \" + after + \" while preparing \" + operation + \"; ClaimBarter did not write this\"); return after. No try/catch: a throw here means nothing ClaimBarter owns has moved. getClaims() is called for its side effect - it runs GriefPrevention's fix-negative pass NOW, on this thread, and leaves claims non-null so no save thread this trade starts can ever write the pool.",
+   "B6 CHECK: if (blocks > Integer.MAX_VALUE) return fail(\"overflow\"); long updated = (long) bonusBefore + blocks; if (updated > Integer.MAX_VALUE) return fail(\"overflow\"); if (settings.maxPurchasedBlocks() > 0 && updated > settings.maxPurchasedBlocks()) return fail(\"limit-reached\", \"limit\", settings.maxPurchasedBlocks()).",
+   "B7 PREPARE - every allocation the unwind can need, before anything moves. One try { Integer grantBox = Integer.valueOf((int) updated); Integer restoreBox = Integer.valueOf(bonusBefore); Handover refund = new Handover(); String name = player.getName(); int beforeTake = countCurrency(inventory); if (data.getBonusClaimBlocks() != bonusBefore) { logger.warning(name + \"'s bonus pool changed from \" + bonusBefore + \" while preparing a purchase; the purchase was refused and nothing was charged\"); return Result.fail(\"transaction-failed\"); } } catch (Throwable prepFailure) { logger.log(Level.SEVERE, \"Refused a purchase for \" + player.getName() + \": the transaction could not be prepared; nothing moved\", prepFailure); return Result.fail(\"transaction-failed\"); }. Both exits are truthful: nothing was charged.",
+   "B8 LEDGER (primitive locals, no allocation): int itemsTaken = 0 (UNKNOWN = -1); boolean blocksMutated = false; boolean saveStarted = false; boolean poolRestored = false; boolean refundSkipped = false; int returned = 0; int liveAfter = UNKNOWN; Throwable failure = null, undoFailure = null, persistFailure = null.",
+   "B9 TAKE, MEASURED (first mutation). try { removeCurrency(inventory, items); } catch (Throwable thrown) { failure = thrown; } then, in its own try { itemsTaken = beforeTake - countCurrency(inventory); } catch (Throwable thrown) { itemsTaken = UNKNOWN; if (failure == null) failure = thrown; }. Then if (failure == null && itemsTaken != items) failure = new IllegalStateException(\"the inventory changed between the count and the removal\"). If failure != null go straight to U1 (blocksMutated is false, so U1 and U3 are no-ops). removeCurrency keeps its current body; it is NOT asked to return a count, because the measurement must survive a throw inside setStorageContents.",
+   "B10+B11 MUTATE POOL AND PERSIST, one try: try { data.setBonusClaimBlocks(grantBox); blocksMutated = true; store.savePlayerData(playerId, data); saveStarted = true; } catch (Throwable thrown) { failure = thrown; }. The setter takes the pre-existing Integer, so against 16.18.7 it is a bare putfield that cannot throw; it stays inside the try and each flag is set on the line AFTER the call it records, so a future GriefPrevention cannot silently break the ledger. The only realistic throw is OutOfMemoryError from new SavePlayerDataThread or Thread.start, after which no thread exists and nothing of this trade is on disk.",
+   "B12 SUCCESS (failure == null): try { liveAfter = data.getBonusClaimBlocks(); if (liveAfter != (int) updated) logger.warning(\"After \" + name + \"'s purchase the bonus pool reads \" + liveAfter + \" in memory but \" + updated + \" was written; something outside ClaimBarter wrote it during the trade\"); } catch (Throwable ignored) {} ; try { logger.info(name + \" bought \" + blocks + \" claim blocks for \" + items + \" \" + settings.currencyName(items) + \"; bonus pool \" + bonusBefore + \" -> \" + updated); } catch (Throwable ignored) {} ; return Result.ok(\"bought\", \"blocks\", blocks, \"items\", items, \"item\", settings.currencyName(items)). The INFO line is the only handle an operator has for reconciling a GriefPrevention-swallowed write failure against a specific trade.",
+   "U1 UNDO POOL (only if blocksMutated; own try/catch(Throwable) -> undoFailure): int live = data.getBonusClaimBlocks(); if (live == (int) updated) { data.setBonusClaimBlocks(restoreBox); poolRestored = true; } else { long relative = (long) live - blocks; if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE) { data.setBonusClaimBlocks(Integer.valueOf((int) relative)); poolRestored = true; } }. When !blocksMutated set poolRestored = true (there is nothing to restore). The equality is a MEASUREMENT that nothing else wrote the pool, and in that state relative and absolute coincide, so the pre-boxed write is allocation-free AND provably not the #8 snapshot clobber. Runs BEFORE the refund so no ItemSpawnEvent listener fired by the refund can trigger a GriefPrevention save while the grant is live.",
+   "U2 REFUND ITEMS (own try/catch(Throwable) around the call, though deliver never throws): refundSkipped = (blocksMutated && !poolRestored) || itemsTaken == UNKNOWN. If (!refundSkipped && itemsTaken > 0) { deliver(player, itemsTaken, \"refund for a failed purchase\", refund); returned = refund.delivered; }. Skipped beside a live grant because a refund there is a mint; skipped on an unknown count because refunding a guess is either loss or duplication and the plugin cannot tell which.",
+   "U3 PERSIST THE POOL (only if blocksMutated; after U2 so a stalled sync write cannot delay the refund): persistFailure = persistRollback(store, playerId, data). Runs in BOTH pool states: when restored it writes the corrected pool; when the grant stands it writes the standing grant, because the items were not refunded and the purchase is now a completed-but-unsaved trade. persistRollback body: try { store.savePlayerDataSync(playerId, data); return null; } catch (Throwable thrown) { return thrown; } - Throwable, not RuntimeException, and it RETURNS the throwable rather than logging.",
+   "U4 READ FINAL POOL: try { liveAfter = data.getBonusClaimBlocks(); } catch (Throwable ignored) { liveAfter = UNKNOWN; }.",
+   "U5 SUPPRESSED (before the summary, each in its own try/catch(Throwable), skipping any that is identical to failure): failure.addSuppressed(undoFailure); failure.addSuppressed(refund.failure); failure.addSuppressed(persistFailure). Guarded because HotSpot can hand out the same preallocated OutOfMemoryError twice and Throwable.addSuppressed throws IllegalArgumentException on self-suppression.",
+   "U6 SUMMARY - exactly ONE SEVERE, composed last from measured values only, wrapped in try/catch(Throwable) so a log allocation failure cannot abort anything (every state step is already complete). Text: \"Purchase failed for \" + name + \" (\" + playerId + \"): \" + items + \" \" + settings.currencyName(items) + \" requested, \" + (itemsTaken == UNKNOWN ? \"an unknown number\" : itemsTaken) + \" taken, \" + (refundSkipped ? \"0 returned (the refund was deliberately skipped)\" : returned + \" returned\") + \"; claim blocks: \" + BLOCKS + \"; durable write: \" + WRITE + \". Fix by hand: \" + FIX, logged with failure as the Throwable. BLOCKS = !blocksMutated ? \"never granted\" : poolRestored ? (\"granted \" + blocks + \" and undone in memory, pool now \" + liveAfter) : (\"granted \" + blocks + \" and NOT undone, pool now \" + liveAfter + \", should be \" + bonusBefore + \" if nothing else wrote it\"). WRITE = !blocksMutated ? \"not attempted; nothing of this trade was ever written\" : persistFailure != null ? \"the synchronous write threw\" : \"the synchronous write returned; GriefPrevention swallows write failures, so this does not confirm what the file holds\".",
+   "U6a FIX is COMPOSITIONAL - append every clause that applies, space-joined; print \"nothing\" only when none does. (1) itemsTaken == UNKNOWN -> \"Inspect the inventory: up to \" + items + \" \" + settings.currencyName(items) + \" may be missing and were not refunded automatically.\" (2) itemsTaken != UNKNOWN && !refundSkipped && returned < itemsTaken -> \"Give back \" + (itemsTaken - returned) + \" \" + settings.currencyName(itemsTaken - returned) + \"; if a stack was reported as unconfirmed above, check the ground at the player's position first.\" (3) refundSkipped && blocksMutated && !poolRestored -> \"The purchase stands: the items are the payment and the blocks were kept. If the player's file does not show bonus=\" + updated + \" after their next save, run /adjustbonusclaimblocks \" + name + \" \" + blocks + \".\" (4) blocksMutated && poolRestored -> \"Verify the player's file: if it shows bonus=\" + updated + \", a save that was already in flight serialized the abandoned total; run /adjustbonusclaimblocks \" + name + \" -\" + blocks + \".\" Clause (4) is mandatory and is what removes the false all-clear: whenever a grant was applied and undone, the operator is told the disk may still be wrong and exactly how to check.",
+   "U7 OUTCOME: Throwable first = the first java.lang.Error among failure, undoFailure, refund.failure, persistFailure in that order; if (first != null) throw (Error) first. Otherwise (unreachable against 16.18.7, where only Errors are reachable inside the mutation, but defined): if (refundSkipped) throw new IllegalStateException(\"the purchase is in a state no configured message describes truthfully\", failure); else return returned < itemsTaken ? Result.fail(\"items-lost\", \"lost\", itemsTaken - returned, \"item\", settings.currencyName(itemsTaken - returned)) : Result.fail(\"transaction-failed\")."
+  ],
+  "sell_steps": [
+   "S1 REFUSE: if (!settings.sellingEnabled()) return fail(\"selling-disabled\"); if (blocks <= 0) return fail(\"invalid-amount\").",
+   "S2 STORE: DataStore store = dataStore(\"a sale\", player); null -> fail(\"data-unavailable\").",
+   "S3 RESOLVE: UUID playerId = player.getUniqueId(); PlayerData data = store.getPlayerData(playerId); PlayerInventory inventory = player.getInventory(). data is fetched once and never re-fetched.",
+   "S4 WARM: int purchased = warmClaimData(data, player, \"a sale\") - the same helper as buy. After it, claims is non-null, so getRemainingClaimBlocks() below runs no fix-negative pass and its internal bonus read is the post-warm value; that is what makes the two numbers this method uses describe one state.",
+   "S5 POOL CHECK: if (purchased < blocks) return fail(\"not-enough-blocks\", \"have\", purchased). Only the bonus pool is sellable. This also refuses the negative pools GriefPrevention's own /sellclaimblocks and /adjustbonusclaimblocks can create.",
+   "S6 AVAILABILITY: int available = data.getRemainingClaimBlocks(); if (available < blocks) return fail(\"blocks-in-use\", \"available\", available). Javadoc must state this is GriefPrevention's own figure: it includes permission-group bonus blocks and maps arithmetic overflow to 0 (which reads here as blocks-in-use, the safe direction).",
+   "S7 PRICE: int items = (int) Math.floor(blocks / (double) settings.blocksPerItem() * settings.refundRatio()); if (items <= 0) return fail(\"amount-too-small\", \"item\", settings.currencyName()). Rounding down is the documented 'the argument is what the player hands over' rule, not a loss.",
+   "S8 PREPARE, one try { Integer deductBox = Integer.valueOf(purchased - blocks); Integer restoreBox = Integer.valueOf(purchased); Handover payout = new Handover(); String name = player.getName(); if (data.getBonusClaimBlocks() != purchased) { logger.warning(name + \"'s bonus pool changed from \" + purchased + \" while preparing a sale; the sale was refused and nothing was charged\"); return Result.fail(\"transaction-failed\"); } } catch (Throwable prepFailure) { logger.log(Level.SEVERE, \"Refused a sale for \" + player.getName() + \": the transaction could not be prepared; nothing moved\", prepFailure); return Result.fail(\"transaction-failed\"); }. purchased >= blocks >= 1 so purchased - blocks cannot overflow.",
+   "S9 LEDGER: boolean blocksMutated = false, saveStarted = false, poolRestored = false; int liveAfter = UNKNOWN; Throwable failure = null, undoFailure = null, persistFailure = null.",
+   "S10 MUTATE POOL AND PERSIST, one try: try { data.setBonusClaimBlocks(deductBox); blocksMutated = true; store.savePlayerData(playerId, data); saveStarted = true; } catch (Throwable thrown) { failure = thrown; }. Nothing has been handed over at this point, by construction.",
+   "SU1 UNDO (failure != null; own try/catch(Throwable) -> undoFailure): if (!blocksMutated) poolRestored = true; else { int live = data.getBonusClaimBlocks(); if (live == purchased - blocks) { data.setBonusClaimBlocks(restoreBox); poolRestored = true; } else { long relative = (long) live + blocks; if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE) { data.setBonusClaimBlocks(Integer.valueOf((int) relative)); poolRestored = true; } } }.",
+   "SU2 PERSIST - only when blocksMutated AND poolRestored: persistFailure = persistRollback(store, playerId, data). When the deduction is left standing the write is DELIBERATELY SKIPPED: making an unpaid deduction durable is the plugin choosing the player's loss, and the summary says so and names the restore command instead.",
+   "SU3 READ FINAL POOL: try { liveAfter = data.getBonusClaimBlocks(); } catch (Throwable ignored) { liveAfter = UNKNOWN; }.",
+   "SU4 SUPPRESSED then SU5 SUMMARY - one SEVERE, composed last, in try/catch(Throwable): \"Sale failed for \" + name + \" (\" + playerId + \"): \" + (blocksMutated ? \"deducted \" + blocks + \" claim blocks in memory, \" + (poolRestored ? \"undone\" : \"NOT undone\") : \"the deduction was never applied\") + \", pool now \" + liveAfter + \" (was \" + purchased + \"); no items were paid out; durable write: \" + WRITE + \". Fix by hand: \" + FIX, with failure as the Throwable. WRITE = !blocksMutated ? \"not attempted; nothing of this trade was ever written\" : !poolRestored ? \"skipped deliberately, so this plugin did not make the unpaid deduction durable\" : persistFailure != null ? \"the synchronous write threw\" : \"the synchronous write returned; GriefPrevention swallows write failures, so this does not confirm what the file holds\". FIX is compositional: (1) blocksMutated && !poolRestored -> \"Give the blocks back: run /adjustbonusclaimblocks \" + name + \" \" + blocks + \", or set the pool to \" + purchased + \" by hand. GriefPrevention may persist the deduction on this player's next save before you act.\" (2) blocksMutated && poolRestored -> \"Verify the player's file: if it shows bonus=\" + (purchased - blocks) + \", a save that was already in flight serialized the deducted total; run /adjustbonusclaimblocks \" + name + \" \" + blocks + \".\" (3) neither -> \"nothing\".",
+   "SU6 OUTCOME: first Error among failure, undoFailure, persistFailure -> throw it. Else if (!poolRestored) throw new IllegalStateException(\"the sale is in a state no configured message describes truthfully\", failure). Else return Result.fail(\"transaction-failed\") - truthful: nothing was handed over and the pool reads its pre-sale value.",
+   "S11 SUCCESS PATH - CANARY THEN PAYOUT (failure == null; the deduction is applied and its save thread started, so the server can no longer lose): try { liveAfter = data.getBonusClaimBlocks(); if (liveAfter != purchased - blocks) logger.warning(\"After \" + name + \"'s sale the bonus pool reads \" + liveAfter + \" in memory but \" + (purchased - blocks) + \" was written; something outside ClaimBarter wrote it during the trade\"); } catch (Throwable ignored) {} ; deliver(player, items, \"payout for a sale\", payout); int paid = payout.delivered.",
+   "S12 OUTCOME: if (payout.failure instanceof Error error) throw error (deliver has already written its SEVERE with the exact counts; the sale itself is correct - blocks gone, save started - only the payout is short). Else if (paid < items) return Result.fail(\"items-lost\", \"lost\", items - paid, \"item\", settings.currencyName(items - paid)). Else try { logger.info(name + \" sold \" + blocks + \" claim blocks for \" + items + \" \" + settings.currencyName(items) + \"; bonus pool \" + purchased + \" -> \" + (purchased - blocks)); } catch (Throwable ignored) {} ; return Result.ok(\"sold\", \"blocks\", blocks, \"items\", items, \"item\", settings.currencyName(items))."
+  ],
+  "info_steps": [
+   "I1 STORE: DataStore store = dataStore(\"a rate lookup\", player); if (store == null) return Result.fail(\"data-unavailable\").",
+   "I2 DATA: PlayerData data = store.getPlayerData(player.getUniqueId()).",
+   "I3 WARM: int purchased = warmClaimData(data, player, \"a rate lookup\") - the same helper. This is what makes the two numbers agree: the fix-negative pass, if any, runs here, so purchased is post-fix and the getRemainingClaimBlocks() below runs with claims already non-null and therefore performs no further pool write. It also gives the operator the one WARNING line that records a pool change a read-only lookup triggered, which is the only place in the plugin where GriefPrevention's own credit is visible.",
+   "I4 AVAILABLE: int available = data.getRemainingClaimBlocks().",
+   "I5 RETURN Result.ok(\"info\", \"item\", settings.currencyName(), \"blocks\", settings.blocksPerItem(), \"purchased\", purchased, \"available\", available).",
+   "I6 NO try/catch anywhere in info(). Nothing ClaimBarter owns is live, so a throw propagates to the dispatcher. info() must never be able to return transaction-failed, items-lost or any trade-failure key - that is review failure #14 and it stays closed structurally, not by discipline.",
+   "I7 Javadoc must state that the lookup is not side-effect-free: GriefPrevention flushes newly accrued blocks and may run its fix-negative pass in memory. That is GriefPrevention's own behaviour on any claims query (a shovel click does the same), ClaimBarter does not persist it, and the WARNING in I3 is the record."
+  ],
+  "failure_table": [
+   {
+    "point": "B2/B4/S3/I2 pre-warm reads: countCurrency, store.getPlayerData (synchronized on the DataStore, may block behind a save thread's retrying lazy load). Only java.lang.Error is reachable; NPE on GriefPrevention.instance.dataStore is not observable in 16.18.7 (no aconst_null store to either field exists in the jar).",
+    "handling": "No try/catch. Propagates to SimpleCommandMap.dispatch. Nothing to compensate.",
+    "player_sees": "The server dispatcher's generic internal-error message. Truthful: nothing happened.",
+    "operator_sees": "The dispatcher's SEVERE with the stack. No ClaimBarter line, because there is nothing to fix by hand.",
+    "invariant_kept": "never-mint kept; never-lose-items kept; no-lies kept; diagnosable kept."
+   },
+   {
+    "point": "B5/S4/I3 warmClaimData: getBonusClaimBlocks' lazy load (Files.readLines with up to 5 retries of Thread.sleep(5) under the DataStore monitor) or getClaims throws (Error; NPE unobservable).",
+    "handling": "Propagates. Nothing ClaimBarter owns has moved; GriefPrevention may have partially applied its own accrued clamp or fix-negative pass in memory, which is its own idempotent bookkeeping.",
+    "player_sees": "Dispatcher's generic error. Truthful.",
+    "operator_sees": "Dispatcher's SEVERE with the stack.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "B5/S4/I3 SILENT: the lazy load cannot parse the player file after 5 retries (corrupt file, or a concurrent truncating Files.write of the same file) and loadDataFromSecondaryStorage stores bonus=0 and accrued=initialBlocks into the live object.",
+    "handling": "NONE POSSIBLE. There is no API signal distinguishing 'no bonus' from 'load failed'. buy then computes 0 + blocks and its save persists that, erasing previously purchased blocks; sell refuses (0 < blocks); info displays 0. The warm's WARNING does not fire because before and after are both 0.",
+    "player_sees": "bought (true for this trade) / not-enough-blocks with have=0 / info showing 0 purchased. Each is a true statement about what the live object holds.",
+    "operator_sees": "Only GriefPrevention's own log line and printStackTrace from getPlayerDataFromStorage, plus ClaimBarter's per-trade INFO line 'bonus pool 0 -> N', which is the reconciliation handle.",
+    "invariant_kept": "never-mint kept; never-lose-items kept for items but BROKEN for the player's previously purchased blocks; no-lies kept; diagnosable only via GriefPrevention's own line. Residual: identical exposure exists in GriefPrevention's own /buyclaimblocks and in every GriefPrevention save of that player."
+   },
+   {
+    "point": "B5/S4/I3 the warm itself moves the pool: GriefPrevention's fix-negative pass (config_advanced_fixNegativeClaimblockAmounts defaults true) credits bonusClaimBlocks at getClaims offset 428, on THIS thread, before the snapshot.",
+    "handling": "Intended. The post-warm value is what the trade is computed from and what restoreBox holds, so the credit is never clobbered. One WARNING records it. Bounded volume: getClaims can only take that branch once per PlayerData lifetime.",
+    "player_sees": "Normal flow; the higher pool is reflected in every number shown.",
+    "operator_sees": "WARNING naming the before and after values and the operation that triggered it.",
+    "invariant_kept": "All four kept. This is the whole point of the warm: it converts an unsynchronized cross-thread write into a main-thread one that happens before the snapshot."
+   },
+   {
+    "point": "B7/S8 PREPARE: OutOfMemoryError in Integer.valueOf, new Handover, player.getName() or countCurrency.",
+    "handling": "caught (Throwable) -> one SEVERE 'the transaction could not be prepared; nothing moved' -> return fail(\"transaction-failed\"). Moving every allocation the unwind needs to here is what makes its failure free.",
+    "player_sees": "transaction-failed ('rolled back. Nothing was charged') - true. Under genuine heap exhaustion Messages.render allocates and may rethrow, in which case the dispatcher's generic error is shown instead; also truthful.",
+    "operator_sees": "SEVERE naming the player, with the Throwable, and the words 'nothing moved'.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "B7/S8 PREPARE pool recheck fails: data.getBonusClaimBlocks() != the value snapshotted at the warm. Unreachable against 16.18.7 after the warm; defined for a future GriefPrevention.",
+    "handling": "Refusal BEFORE any mutation. WARNING, return fail(\"transaction-failed\"). Deliberately a refusal and not a rollback, so it can never write an absolute snapshot over a foreign change (review #8).",
+    "player_sees": "transaction-failed - true: nothing was charged and nothing was paid.",
+    "operator_sees": "WARNING naming the expected value and the operation.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "B9 removeCurrency throws: an Error inside setStorageContents after some slots were written, or inside the getStorageContents array copy. The declared IllegalArgumentException is unreachable (the array length is the inventory's own).",
+    "handling": "failure recorded; itemsTaken measured as beforeTake - countCurrency(inventory), which is correct whether getStorageContents hands back copies or write-through mirrors. blocksMutated is false, so U1 and U3 are no-ops. U2 refunds exactly the measured amount; U6 summary; U7 rethrows the Error.",
+    "player_sees": "Dispatcher's generic error (an Error is rethrown). Truthful. In the unreachable RuntimeException variant: transaction-failed when everything came back, items-lost with the measured shortfall otherwise.",
+    "operator_sees": "SEVERE: 'N requested, M taken, R returned; claim blocks: never granted; durable write: not attempted...; Fix by hand: Give back L ...' plus deliver's own line if the refund fell short.",
+    "invariant_kept": "never-mint kept (the pool was never touched); never-lose-items kept when the refund lands, best-effort with an exact logged count otherwise; no-lies kept; diagnosable kept."
+   },
+   {
+    "point": "B9 sub-case: removeCurrency threw AND the recount also threw (heap exhaustion).",
+    "handling": "itemsTaken = UNKNOWN. The refund is DELIBERATELY SKIPPED: refunding `items` when fewer were taken is duplication, refunding fewer is loss, and the plugin cannot tell which. U6 names the ceiling; U7 rethrows the Error (RuntimeException variant: IllegalStateException, because no configured key states 'an unknown number of your items may be missing').",
+    "player_sees": "Dispatcher's generic error. Truthful.",
+    "operator_sees": "SEVERE '... an unknown number taken, 0 returned (the refund was deliberately skipped) ... Fix by hand: Inspect the inventory: up to N <item> may be missing and were not refunded automatically.'",
+    "invariant_kept": "never-mint kept; never-lose-items BEST-EFFORT (a bounded, logged possible loss, chosen over a possible duplication); no-lies kept; diagnosable kept."
+   },
+   {
+    "point": "B9 sub-case: removeCurrency returns normally but itemsTaken != items. Unreachable on one thread (nothing between the PREPARE count and the removal fires an event); measured anyway.",
+    "handling": "failure = IllegalStateException('the inventory changed between the count and the removal'); unwind as a normal no-grant failure: refund the measured amount, summary, Result.",
+    "player_sees": "transaction-failed or items-lost with the measured count. Truthful.",
+    "operator_sees": "SEVERE with that cause and the measured numbers.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "B10/S10 data.setBonusClaimBlocks(preBoxedInteger).",
+    "handling": "ELIMINATED as a throw point: verified aload_0/aload_1/putfield/return with an Integer that already exists. Kept inside the try with its flag on the next line so a future GriefPrevention cannot break the ledger silently. If a future version did throw, blocksMutated stays false and U1/U3 are skipped - no phantom rollback (review #7).",
+    "player_sees": "n/a in 16.18.7.",
+    "operator_sees": "n/a in 16.18.7.",
+    "invariant_kept": "Closes review #7 and #17 structurally rather than by argument."
+   },
+   {
+    "point": "B10/B11 store.savePlayerData throws OutOfMemoryError from new SavePlayerDataThread or Thread.start ('unable to create native thread'). This is the only realistic entry to the buy unwind.",
+    "handling": "Items are taken; the grant is live in memory; NO thread started and nothing of this trade is on disk. U1 reads the pool, measures that it still equals the granted total, and writes back the pre-boxed restore value (allocation-free, relative == absolute by measurement). U2 refunds the measured itemsTaken. U3 persistRollback. U6 summary with the mandatory verify-the-file clause. U7 rethrows the Error with the others suppressed.",
+    "player_sees": "Dispatcher's generic error. Truthful: nothing claimed the trade worked.",
+    "operator_sees": "SEVERE: '... granted N and undone in memory, pool now X; durable write: the synchronous write returned; GriefPrevention swallows write failures, so this does not confirm what the file holds. Fix by hand: Verify the player's file: if it shows bonus=UPDATED, a save that was already in flight serialized the abandoned total; run /adjustbonusclaimblocks NAME -N.' plus the OOM stack.",
+    "invariant_kept": "never-mint kept in memory unconditionally, and on disk against every writer that starts after U3; BEST-EFFORT against a writer that read the granted total before U1 and writes after U3 - which is exactly what the mandatory clause (4) tells the operator to check. never-lose-items kept when the refund lands (native-thread OOM leaves the heap usable). no-lies kept. diagnosable kept."
+   },
+   {
+    "point": "U1/SU1: the pool no longer equals what this trade wrote AND the relative correction is outside int range (or the fresh Integer.valueOf throws). Requires a foreign writer plus, in the allocation case, heap exhaustion; unreachable against 16.18.7 after the warm.",
+    "handling": "poolRestored stays false, undoFailure recorded. BUY: the refund is SKIPPED (a refund beside a live grant is a mint), U3 still persists the standing grant because the items are now the payment for a completed-but-unsaved purchase. SELL: SU2 is SKIPPED so the plugin does not make an unpaid deduction durable. Both then log and rethrow (or throw IllegalStateException in the unreachable RuntimeException variant).",
+    "player_sees": "Dispatcher's generic error. Truthful: nothing is claimed in either direction, and no configured key would be true.",
+    "operator_sees": "BUY SEVERE '... granted N and NOT undone, pool now X, should be B if nothing else wrote it ... Fix by hand: The purchase stands: the items are the payment and the blocks were kept. If the player's file does not show bonus=U after their next save, run /adjustbonusclaimblocks NAME N.' SELL SEVERE '... deducted N ... NOT undone ... durable write: skipped deliberately ... Fix by hand: Give the blocks back: run /adjustbonusclaimblocks NAME N ...'",
+    "invariant_kept": "never-mint kept (buy refuses to refund against a live grant; sell refuses to persist an unpaid deduction). never-lose-items kept on buy (items are the payment); on sell the player is temporarily short the blocks with no items, loudly reported with the exact command - the server never loses. no-lies kept. diagnosable kept."
+   },
+   {
+    "point": "U2/S11 deliver: inventory.addItem throws after placing part of a stack (Error only; the declared IllegalArgumentException is for a null element).",
+    "handling": "Caught inside deliver into out.failure. placed is the inventory diff countCurrency(after) - countCurrency(before), so exactly what a THROWING addItem placed is credited. delivered = min(amount, placed + dropped). One SEVERE from deliver naming placed, dropped, unconfirmed and lost.",
+    "player_sees": "items-lost with the measured shortfall, or the dispatcher's generic error when an Error is being rethrown by the caller.",
+    "operator_sees": "deliver's SEVERE with exact counts and 'must be restored by hand'. No over-count, so a manual restore cannot duplicate.",
+    "invariant_kept": "never-mint kept; never-lose-items best-effort with an exact count; no-lies kept; diagnosable kept. Closes the remaining half of review #12."
+   },
+   {
+    "point": "U2/S11 deliver: the before-count or the after-count itself throws (heap OOM allocating the 36-slot array).",
+    "handling": "If the before-count threw, out.failure records it and placed falls back to the per-contract tally (size minus the leftover amounts for every addItem call that RETURNED). If the after-count threw, the same tally is used. The SEVERE says the number is a lower bound counted from addItem's own return. The tally is never larger than the truth, so the reported loss is never under-stated.",
+    "player_sees": "items-lost with the lower-bound-derived count, or the dispatcher's generic error when an Error is rethrown.",
+    "operator_sees": "SEVERE including '..., counted from addItem's own return because the inventory could not be recounted, so this is a lower bound'.",
+    "invariant_kept": "never-mint kept; never-lose-items best-effort; no-lies kept (the uncertainty is stated, never a bare number presented as exact); diagnosable best-effort."
+   },
+   {
+    "point": "U2/S11 deliver SILENT: another plugin cancels ItemSpawnEvent. dropItemNaturally still returns a non-null Item; the stack is destroyed.",
+    "handling": "entity.isValid() is false, so the stack is credited 0. Nothing threw, so the SEVERE adds 'nothing threw, so a drop was most likely destroyed by another plugin cancelling ItemSpawnEvent'. Review #6 stays closed.",
+    "player_sees": "items-lost with the exact count. True.",
+    "operator_sees": "SEVERE with the placed/dropped/lost breakdown and the cancellation hint.",
+    "invariant_kept": "never-mint kept; never-lose-items best-effort (the loss is another plugin's doing, counted and logged); no-lies kept; diagnosable kept. DEPENDS on paper-server making a never-added entity report isValid()==false, which paper-api cannot prove - confirm on a live server as CLAUDE.md requires."
+   },
+   {
+    "point": "U2/S11 deliver SILENT: an ItemSpawnEvent listener resizes the spawned entity's stack (Item.setItemStack exists and is public in paper-api 26.2).",
+    "handling": "dropped is credited Math.min(handedOverBeforeTheCall, amountHeldByTheValidEntityAfterTheCall). A listener that SHRINKS the stack is caught (the smaller entity amount wins, so the loss is reported). A listener that MERGES or grows it cannot inflate the count past what this trade handed over, so an inflated merge can never mask a later destroyed stack.",
+    "player_sees": "items-lost with the capped, measured count, or 'sold' when nothing was lost. Truthful in both directions.",
+    "operator_sees": "SEVERE with the breakdown when there is a shortfall; nothing when there is not.",
+    "invariant_kept": "never-lose-items and no-lies kept in both directions of listener interference, which neither the pre-call-only nor the post-call-only reading achieves."
+   },
+   {
+    "point": "U2/S11 deliver: a listener teleports the player mid-payout.",
+    "handling": "player.getWorld() and player.getLocation() are re-read for every drop (Entity.getLocation returns a fresh copy per call), so later stacks land where the player now is. Review #11 stays closed.",
+    "player_sees": "Truthful count.",
+    "operator_sees": "Nothing (no shortfall).",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "U2/S11 deliver: a listener kicks the player mid-payout.",
+    "handling": "player.isConnected() (inherited from org.bukkit.OfflinePlayer; verified present in paper-api 26.2) is checked before each chunk. The loop stops; the un-attempted remainder never left the plugin's hands and is reported lost.",
+    "player_sees": "items-lost with the count (rendered to a disconnected player; the console line is the operative record).",
+    "operator_sees": "SEVERE with the breakdown.",
+    "invariant_kept": "never-lose-items best-effort with a truthful count rather than crediting items pushed into an inventory object the player may never see; no-lies kept; diagnosable kept."
+   },
+   {
+    "point": "U2/S11 deliver: dropItemNaturally throws (a listener exception propagating; whether paper-server's PaperEventManager lets it is NOT verifiable from paper-api).",
+    "handling": "The in-flight stack's size is held in out.unconfirmed and is NOT counted as delivered. deliver's SEVERE labels it 'in a stack whose drop threw and may or may not be on the ground' and tells the operator to check the ground before restoring. Callers report amount - delivered to the player, i.e. the unconfirmed stack counts as not received.",
+    "player_sees": "items-lost including the unconfirmed stack, or the dispatcher's generic error when an Error is rethrown.",
+    "operator_sees": "SEVERE with the unconfirmed count called out separately from the lost count, plus the listener's stack.",
+    "invariant_kept": "never-lose-items best-effort; no-lies kept; diagnosable kept. Residual: if the entity was in fact added before the throw, the loss is over-reported by at most one stack - which is why the operator line says to look at the ground first."
+   },
+   {
+    "point": "U3/SU2 persistRollback: savePlayerDataSync throws an Error (OOM in GriefPrevention's StringBuilder, Files.write, PreparedStatement or getClaims debug logging). A RuntimeException is unreachable: both backends catch Exception/SQLException and only log.",
+    "handling": "Caught as Throwable (NOT RuntimeException) and RETURNED. The summary records 'the synchronous write threw' and the clause naming the value to look for still fires. U6/SU5 and the rethrow still run.",
+    "player_sees": "Whatever the ledger chose; the pool is correct in memory.",
+    "operator_sees": "SEVERE summary plus the suppressed throwable on the same record.",
+    "invariant_kept": "never-mint kept in memory, best-effort on disk with the exact value and command logged; never-lose-items kept (the refund already ran); no-lies kept; diagnosable kept."
+   },
+   {
+    "point": "U3/SU2 SILENT: savePlayerDataSync's write fails and GriefPrevention swallows it (FlatFileDataStore.overrideSavePlayerData catch Exception 13..108 -> 111; DatabaseDataStore catch SQLException).",
+    "handling": "Undetectable: persistRollback returns null. The summary NEVER says 'written'; it says the call returned and that GriefPrevention swallows write failures, so this does not confirm what the file holds.",
+    "player_sees": "As chosen by the ledger; the statement is about memory and about a write having been issued, never about the file.",
+    "operator_sees": "GriefPrevention's own error line plus ClaimBarter's summary telling them to verify the file and what value would reveal the race.",
+    "invariant_kept": "no-lies kept because the log claims nothing about disk; durable rollback best-effort. This is the wording fix that removes the false all-clear."
+   },
+   {
+    "point": "SILENT RACE: a SavePlayerDataThread started in an earlier tick for the same uuid (the player's own previous trade, /abandonclaim's deleteClaim save, an admin block command, /ignoreplayer) read the abandoned pool before U1 and performs its truncating Files.write AFTER the synchronous rollback write.",
+    "handling": "Cannot be prevented: overrideSavePlayerData is not synchronized, bonusClaimBlocks is non-volatile, and no happens-before edge to an already-running thread exists. Narrowed by the warm (which removes this plugin's own threads from the set of pool WRITERS, though not of readers) and by running U3 as late as the unwind allows. The mandatory verify-the-file clause names the exact value and command.",
+    "player_sees": "transaction-failed / items-lost / the dispatcher's error as chosen by the ledger. The player message describes memory, which is what they experience until a restart.",
+    "operator_sees": "SEVERE with the mandatory clause 'Verify the player's file: if it shows bonus=U, a save that was already in flight serialized the abandoned total; run /adjustbonusclaimblocks NAME -N.'",
+    "invariant_kept": "never-mint BEST-EFFORT on disk (a mint appears only after a restart, only if the microsecond race was lost, and only with the value named in the log); never-lose-items kept; no-lies kept; diagnosable kept. This is the one repairable half of the chosen design's distinguishing hard break, and the repair is the log, not the mechanism."
+   },
+   {
+    "point": "B12/S12 SILENT: the async SavePlayerDataThread's write fails (full disk, permissions, closed JDBC connection after GriefPrevention's onDisable) or the thread dies from an uncaught Error in run() (its run() has no exception table).",
+    "handling": "NONE POSSIBLE. No GriefPrevention 16.18.7 code path reports a failed player-data write; savePlayerDataSync goes through the identical swallowing code and changes ordering, never observability. ok(\"bought\"/\"sold\") is returned because it is true of the live state.",
+    "player_sees": "bought / sold - true at the moment it is sent. After a restart: buy loses the purchase, sell leaves the player holding both the items and the blocks.",
+    "operator_sees": "GriefPrevention's own 'Unable to save' line and stack, matched against ClaimBarter's per-trade INFO line naming the player, the amounts and 'bonus pool A -> B'.",
+    "invariant_kept": "never-lose-items BROKEN across a restart on buy; never-mint BROKEN across a restart on sell (the SECURITY.md duplication class); no-lies kept at send time; diagnosable only via GriefPrevention's line plus the INFO line. This is the API ceiling and it is shared by all four candidate designs and by GriefPrevention's own /buyclaimblocks and /sellclaimblocks."
+   },
+   {
+    "point": "B12/S11 canary: the pool no longer reads what this trade wrote, on the success path.",
+    "handling": "One WARNING naming both values. No action, no player impact. Unreachable against 16.18.7 after the warm; it exists so a future GriefPrevention that adds an off-thread pool writer is caught on the first server that runs it. WARNING rather than SEVERE precisely because such a version would make it routine.",
+    "player_sees": "bought / sold - true, the trade happened.",
+    "operator_sees": "WARNING 'the bonus pool reads X in memory but Y was written'.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "U6/SU5/deliver: the SEVERE line's own string composition or LogRecord allocation throws (heap OOM).",
+    "handling": "Every logging statement is individually wrapped in try/catch(Throwable) and every state-changing step has already completed before it. Nothing is stranded; the rethrow of the original Error still happens.",
+    "player_sees": "The dispatcher's generic error.",
+    "operator_sees": "Possibly nothing from ClaimBarter; the dispatcher's SEVERE with the stack. ",
+    "invariant_kept": "never-mint, never-lose-items and no-lies kept (state was fixed first); diagnosable BROKEN under heap exhaustion. Unavoidable: java.util.logging allocates and no allocation-free record exists. The guarantee is 'nothing state-changing follows a log', never 'the log lands'."
+   },
+   {
+    "point": "dataStore() returns null (GriefPrevention.instance or .dataStore null).",
+    "handling": "Refuse with data-unavailable and the existing WARNING (not SEVERE: /claimbarter info needs no permission and has no cooldown). Kept as defence in depth against a different or future GriefPrevention build, and against a GriefPrevention whose onEnable threw before assigning dataStore - NOT documented as preventing an unload-race NPE, because no such race exists in 16.18.7.",
+    "player_sees": "data-unavailable. Truthful.",
+    "operator_sees": "WARNING 'Refused <operation> for <player>: GriefPrevention's data store is unavailable'.",
+    "invariant_kept": "All four kept."
+   },
+   {
+    "point": "info(): any Error in getPlayerData, the warm, getRemainingClaimBlocks or rendering.",
+    "handling": "Propagates. info() has no try/catch and cannot map a failure onto a trade key.",
+    "player_sees": "The dispatcher's generic error. Never transaction-failed (review #14 stays closed).",
+    "operator_sees": "The dispatcher's SEVERE. Nothing to fix.",
+    "invariant_kept": "All four kept."
+   }
+  ],
+  "delivery_accounting": "deliver(Player player, int amount, String context, Handover out) returns void and NEVER throws; Handover is a pre-allocated private static final class with the mutable int fields delivered and unconfirmed and a Throwable field failure, created in the PREPARE step so the unwind never allocates a result object. Algorithm: (1) int before = UNKNOWN; try { before = countCurrency(inventory); } catch (Throwable t) { out.failure = t; } - the count is attempted first so a diff is available, and its failure only degrades the accounting, never the payout. (2) Loop while remaining > 0, inside one try/catch(Throwable) that records into out.failure (chaining any second throwable with a guarded addSuppressed): break immediately if !player.isConnected(); size = min(remaining, settings.currency().getMaxStackSize()); build new ItemStack(settings.currency(), size) - which cannot fail for validated settings, since BarterSettings already rejects air and non-items and size >= 1; leftover = inventory.addItem(stack); remaining -= size AFTER addItem returns; placedTally += size - sum(leftover values' amounts) (the leftover map's values ARE the argument objects mutated in place, so size must be read before the call); then for each leftover stack: handedOver = drop.getAmount(), skip if <= 0, set inFlight = handedOver, entity = player.getWorld().dropItemNaturally(player.getLocation(), drop) with world AND location re-read for every single drop, clear inFlight = 0, and if (entity != null && entity.isValid()) dropped += max(0, min(handedOver, entity.getItemStack() == null ? 0 : entity.getItemStack().getAmount())). (3) After the loop: placed = placedTally; if before != UNKNOWN then try { placed = clamp(countCurrency(inventory) - before, 0, amount); exact = true; } catch (Throwable ignored) { keep placedTally }. (4) out.unconfirmed = inFlight; out.delivered = min(amount, placed + dropped); lost = max(0, amount - out.delivered - out.unconfirmed). (5) If out.delivered < amount, ONE guarded SEVERE naming amount, the currency name inflected for amount, the player, the context, out.delivered, placed, dropped, out.unconfirmed, lost, whether the placed figure is exact or a lower bound from addItem's own return, the 'nothing threw, so a drop was most likely destroyed by another plugin cancelling ItemSpawnEvent' clause when out.failure is null, and 'check the ground at the player's position before restoring' when out.unconfirmed > 0. Callers report amount - out.delivered to the player, so an unconfirmed stack counts as NOT received. WHAT THIS CLOSES: a throwing addItem is credited for exactly what it placed, because the diff reads the inventory rather than the return map (review #12, fully, not half); a cancelled spawn is credited 0 (review #6); a teleporting listener cannot misplace later stacks (review #11); a listener that shrinks the dropped stack is caught and one that merges it cannot inflate the count past what was handed over, so neither direction of listener interference produces a silent loss or a duplicating over-restore; a kicked player stops the loop instead of having items pushed into an inventory they may never see. WHAT IT DOES NOT CAPTURE, and must be stated in the javadoc: (a) whether addItem ever places outside the 36 storage slots - the API is silent and every relevant method is abstract, so this must be confirmed on a live server; a miss would over-report loss; (b) whether isValid() is false for a never-added entity - paper-server behaviour, not in the API jar; (c) the true fate of the one unconfirmed stack; (d) a valid drop later despawning, burning, falling into the void, being cleared by an item-clear plugin or picked up by someone else - 'delivered' means 'entered the inventory or existed as a valid entity when read', not 'is in the player's possession'; (e) a listener that adds or removes plain currency from the main inventory during the event, which skews the diff in whichever direction it moved (the clamp keeps the reported loss non-negative and never above amount); (f) under heap exhaustion the counts and the log line themselves allocate and may be lost.",
+  "message_keys": [
+   {
+    "key": "bought",
+    "new_or_existing": "existing, text unchanged",
+    "text": "&aBought &f{blocks} &aclaim blocks for &f{items} {item}&a.",
+    "placeholders": "{blocks} long, {items} int, {item} settings.currencyName(items). Sent only when itemsTaken == items was measured and savePlayerData returned."
+   },
+   {
+    "key": "sold",
+    "new_or_existing": "existing, text unchanged",
+    "text": "&aSold &f{blocks} &aclaim blocks back for &f{items} {item}&a.",
+    "placeholders": "{blocks} int, {items} int, {item} settings.currencyName(items). Sent only when the measured paid == items."
+   },
+   {
+    "key": "info",
+    "new_or_existing": "existing, text unchanged; the values now both come from one post-warm state",
+    "text": "&7Rate: &f1 {item} &7= &f{blocks} &7claim blocks. You hold &f{purchased} &7purchased and &f{available} &7available.",
+    "placeholders": "{item} settings.currencyName() (no count; the template supplies the 1), {blocks} settings.blocksPerItem(), {purchased} the post-warm bonus pool, {available} getRemainingClaimBlocks() read after the warm."
+   },
+   {
+    "key": "transaction-failed",
+    "new_or_existing": "existing, text unchanged - deliberately NOT reworded, because saveDefaultConfig never overwrites and a rewording would not reach an upgraded server (review #15). The sender is now what guarantees the text.",
+    "text": "&cThe trade failed and was rolled back. Nothing was charged. Tell an admin.",
+    "placeholders": "none. Sent ONLY when the ledger proves it: buy - the pool is restored or was never mutated AND returned == itemsTaken; sell - the pool is restored or was never mutated and nothing was ever handed over; plus the pre-mutation refusals (PREPARE threw, or the pool moved before the first mutation). Any other state throws instead."
+   },
+   {
+    "key": "items-lost",
+    "new_or_existing": "existing, text unchanged",
+    "text": "&cSomething went wrong and &f{lost} {item}&c did not reach you. Tell an admin.",
+    "placeholders": "{lost} = a MEASURED shortfall (itemsTaken - returned on a refund, items - paid on a payout); {item} = settings.currencyName(lost), agreeing with it. Never sent with a guessed number."
+   },
+   {
+    "key": "data-unavailable",
+    "new_or_existing": "existing, text unchanged",
+    "text": "&cClaim data is unavailable right now. Try again in a moment.",
+    "placeholders": "none. Only from dataStore() == null, in buy, sell and info."
+   },
+   {
+    "key": "not-enough-items",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cYou need &f{needed} {item}&c and you have &f{have}&c.",
+    "placeholders": "{needed} items, {have} held, {item} settings.currencyName(items) - it must agree with {needed}, the count it is printed beside, as config.yml's own comment requires."
+   },
+   {
+    "key": "not-enough-blocks",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cYou only have &f{have} &cpurchased claim blocks to sell.",
+    "placeholders": "{have} = the post-warm bonus pool."
+   },
+   {
+    "key": "blocks-in-use",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cThose blocks are committed to claims. You have &f{available} &cfree.",
+    "placeholders": "{available} = getRemainingClaimBlocks(), GriefPrevention's own figure."
+   },
+   {
+    "key": "selling-disabled",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cSelling claim blocks is disabled on this server.",
+    "placeholders": "none"
+   },
+   {
+    "key": "amount-too-small",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cThat is too small to return a single {item}.",
+    "placeholders": "{item} settings.currencyName() - the template supplies its own singular."
+   },
+   {
+    "key": "limit-reached",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cYou have reached the purchase ceiling of &f{limit} &cclaim blocks.",
+    "placeholders": "{limit} settings.maxPurchasedBlocks()"
+   },
+   {
+    "key": "invalid-amount",
+    "new_or_existing": "existing, unchanged",
+    "text": "&cGive a whole number greater than zero.",
+    "placeholders": "none"
+   },
+   {
+    "key": "overflow",
+    "new_or_existing": "existing, unchanged; now also covers blocks > Integer.MAX_VALUE, which is reachable on a legitimately negative bonus pool",
+    "text": "&cThat would exceed the maximum a player can hold.",
+    "placeholders": "none"
+   },
+   {
+    "key": "(NO NEW KEYS AND NO REWORDING)",
+    "new_or_existing": "none added, none changed",
+    "text": "Every outcome of this protocol maps onto an existing key with its existing text, so a server whose config.yml predates this change never renders '&cMissing message: <key>'. Where no existing key states the outcome truthfully - a grant or deduction left standing, an unknown number of items taken, or any Error - the plugin THROWS and the server's generic internal-error message, which asserts nothing, is what the player sees. Review failures #10, #15 and #16 are closed by construction, not by discipline. config.yml itself is not edited at all: no new key, no upgrade banner, not even a comment change is required.",
+    "placeholders": "n/a"
+   }
+  ],
+  "javadoc_claims_allowed": [
+   "A trade that cannot be completed is refused before anything moves: every read, every ceiling check and the pool re-read all happen before the first mutation.",
+   "On a purchase the items leave the inventory before the blocks are granted; on a sale the blocks are deducted and their save started before any item is handed over. A failure between the two costs the plugin, never the server.",
+   "Every allocation the never-mint compensation can need is made before the first item moves, so undoing a grant or a deduction in memory is a bare field write that cannot fail. PlayerData.setBonusClaimBlocks(Integer) is aload_0/aload_1/putfield/return, so once the Integer exists the write cannot throw.",
+   "The never-lose-items compensation allocates by nature. It is guarded and measured instead of assumed, and the two invariants are reasoned about separately.",
+   "Compensation is driven by a ledger of what actually landed - each flag set on the line after the call it records, each number measured after the fact - and every compensation step, log statement and addSuppressed is individually guarded so no step's failure can skip a later one.",
+   "getClaims() is forced on the main thread before the bonus pool is read. PlayerData.claims is written in only two places, the constructor and getClaims offset 15, and GriefPrevention's fix-negative credit to bonusClaimBlocks at offset 428 lives inside the claims == null branch; so after this call no SavePlayerDataThread this plugin starts can write the bonus pool.",
+   "A rollback written with savePlayerDataSync is ordered only against writes that START LATER. An asynchronous writer already in flight can still truncate the file afterwards.",
+   "No number is reported to a player that the plugin did not measure. Where no configured message states the outcome truthfully, the plugin throws rather than bending a key or adding one.",
+   "MANDATORY NON-GUARANTEES the javadoc must also state: a player-data write failure is invisible - both GriefPrevention backends catch Exception around the write and only log, so savePlayerDataSync changes ordering and never observability, and nothing here ever claims what the file holds; a lazy load that cannot parse the player file yields bonus=0 after five retries and this plugin cannot tell that from a genuinely empty pool; bonusClaimBlocks is a non-volatile Integer with an unsynchronized getter and setter and GriefPrevention writes it too.",
+   "MANDATORY DELETIONS: the class javadoc sentence 'nothing else is in flight to race' must go - overrideSavePlayerData is not synchronized and Files.write truncates, so it contradicts the bytecode and the persistRollback javadoc in the same file. dataStore()'s 'GriefPrevention clears as it unloads' must go - there is no aconst_null store to GriefPrevention.instance or .dataStore anywhere in the jar; the guard is defence in depth against a GriefPrevention that never finished enabling or a different build, and is a narrowing, not an NPE guarantee. persistRollback's 'it logs instead' must go - it catches Throwable and RETURNS it, and a normal return does not mean the file was written."
+  ],
+  "residual_risks": [
+   "A player-data write that GriefPrevention swallows is invisible on every path, synchronous or asynchronous. After 'bought' the grant may live only in memory until GriefPrevention's next save of that player; after 'sold' the deduction may. A crash before that save costs the player on a buy and duplicates on a sell. No DataStore API reports it, and re-reading GriefPrevention's storage is backend-specific, absent for the database backend, and still races the async thread. GriefPrevention's own /buyclaimblocks and /sellclaimblocks carry the identical exposure, and /sellclaimblocks additionally pays out before it deducts.",
+   "A SavePlayerDataThread started in an earlier tick can serialize the abandoned pool value after the in-memory undo and after the synchronous rollback write. Two unsynchronized truncating writers of one file cannot be ordered from a plugin. The warm removes this plugin's own threads as pool WRITERS but not as readers, and the summary now always names the value to verify and the exact /adjustbonusclaimblocks command.",
+   "A lazy load that cannot parse the player file silently yields bonus=0, and a purchase then makes 0 + blocks durable, erasing earlier purchases. Undetectable through the API; the per-trade INFO line ('bonus pool 0 -> N') is the only reconciliation aid.",
+   "Under genuine heap exhaustion - as opposed to the native-thread exhaustion that is the realistic savePlayerData failure - the refund, the recounts, the fresh-boxed undo branch, the synchronous write and every log line may all fail. The design guarantees only the allocation-free in-memory undo and the ordering of steps; the operator record is best-effort because java.util.logging allocates.",
+   "Four behaviours this spec depends on are CraftBukkit/paper-server behaviours absent from the API jar and MUST be confirmed on a live Paper server next to GriefPrevention before the change is reported as verified, as CLAUDE.md requires: isValid() == false for a cancelled ItemSpawnEvent; addItem placing only into the 36 storage slots; whether getStorageContents returns copies or write-through mirrors; whether a listener exception can propagate out of dropItemNaturally.",
+   "The warm adds one O(total server claims) scan of DataStore.claims on the main thread per PlayerData lifetime, and getPlayerData can block up to ~25 ms behind another thread's retrying lazy load. sell() and info() already paid this through getRemainingClaimBlocks; GriefPrevention pays it on every shovel interaction. It is once per cached PlayerData, not per trade.",
+   "There is no cooldown on buy or sell. A player standing where another plugin cancels ItemSpawnEvent, with a full inventory, can emit one SEVERE per sell indefinitely. Adding a cooldown or a rate limiter is a feature change outside the ROADMAP's scope; the spec keeps SEVERE because the shortfall is genuine item loss.",
+   "One INFO line per completed trade. It is the only handle for reconciling a GriefPrevention-swallowed write failure against a specific trade, and it is also log volume a busy server pays for on every trade.",
+   "getRemainingClaimBlocks includes permission-group bonus blocks and maps arithmetic overflow to Integer.MAX_VALUE or 0 internally. The 'available' figure is therefore GriefPrevention's own, looser than the bonus pool alone, and errs toward refusal.",
+   "Negative bonus pools are legitimate GriefPrevention state. The spec never asserts bonus >= 0; the relative undo and the overflow guards tolerate them.",
+   "getClaims assigns claims = new Vector() at offset 15 BEFORE it populates the list, so a caller that enters while another thread is mid-scan sees a non-null, incomplete Vector and returns early. The warm runs to completion on the main thread before this plugin starts any save thread, so this plugin's own threads are safe; a GriefPrevention save thread from a prior tick that entered getClaims first would make the warm a no-op and run the fix pass itself. Not fixable from a plugin.",
+   "Pre-mutation failures leave no ClaimBarter SEVERE, only the dispatcher's. Accepted: nothing moved and nothing needs fixing, and duplicating the server's own stack trace would only add noise."
+  ]
+ },
+ "harness_plan": {
+  "stubs_needed": [
+   "org.bukkit.Material - plain class (NOT an enum: the harness must construct arbitrary instances). Static Material matchMaterial(String); instance name(), isAir(), isItem(), getMaxStackSize(). Knobs: maxStackSize (to exercise chunking at 1, 16, 64), isItem/isAir flags (to prove BarterSettings still refuses them).",
+   "org.bukkit.inventory.ItemStack - getType(), getAmount(), setAmount(int), hasItemMeta(), clone(), plus a harness-only newInstanceCount. Knobs: hasItemMeta flag per stack (to prove metadata stacks are never counted or spent), throwOnSetAmountAfterN (Error), throwOnConstructAfterN (Error, to exercise the deliver allocation-failure row).",
+   "org.bukkit.inventory.PlayerInventory - backed by a 36-element ItemStack[]. getStorageContents(), setStorageContents(ItemStack[]), addItem(ItemStack...) returning HashMap<Integer,ItemStack>, getMaxStackSize(). Knobs: mirrorSemantics (getStorageContents returns the live array vs defensive copies - EVERY injection must be run under BOTH), freeSlots (0 forces the drop path), throwInSetStorageContentsAfterSlotK (Error, leaving K slots written), throwInAddItemAfterPlacingK (Error, leaving K items placed - this is the review #12 case), throwOnGetStorageContentsCallN (Error, to make a countCurrency call fail), addItemLeavesLeftover(n).",
+   "org.bukkit.entity.Item - isValid(), getItemStack(). Knobs: validFlag (false models a cancelled ItemSpawnEvent), heldStackAmount (settable independently of what was handed over: SHRINK models a resizing listener, GROW models a merging listener), returnNullStack.",
+   "org.bukkit.World - Item dropItemNaturally(Location, ItemStack). Knobs: cancelDropNumberN (returns an Item with validFlag=false), throwOnDropNumberN (RuntimeException and Error variants), shrinkDropNumberNTo(k), growDropNumberNTo(k), teleportPlayerOnDropN (swaps the player's Location and World so the harness can assert the re-read), kickPlayerOnDropN (flips the player's connected flag), returnNullOnDropN, and a recorded log of every (location, world, amount) it was called with.",
+   "org.bukkit.Location - immutable holder of a World reference and coordinates; must be a NEW object per Player.getLocation() call so the harness can assert per-drop re-reads.",
+   "org.bukkit.entity.Player - getInventory(), getName(), getUniqueId(), getWorld(), getLocation(), isConnected(), isOnline(), sendMessage(Component). Knobs: connected flag, swappable world/location, getNameThrows (Error, for the PREPARE row), and a record of every message received.",
+   "org.bukkit.command.CommandSender - sendMessage(Component) only; Player implements it.",
+   "org.bukkit.configuration.ConfigurationSection and org.bukkit.configuration.file.FileConfiguration - Map-backed. getString(path, def) must return def when the key is absent OR when the stored value is null (verified MemorySection behaviour), getInt/getDouble/getBoolean with defaults, getConfigurationSection(path), getKeys(false). Loaded from the real src/main/resources/config.yml values so the harness exercises the shipped texts.",
+   "net.kyori.adventure.text.Component - holds the rendered String and exposes it for assertions. net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer - static legacyAmpersand() returning a singleton whose deserialize(String) wraps the string unchanged. These exist only so Messages compiles and so the harness can read back exactly what the player would see.",
+   "me.ryanhamshire.GriefPrevention.GriefPrevention - public static GriefPrevention instance; public DataStore dataStore. Knobs: instance = null, dataStore = null (to drive the data-unavailable rows).",
+   "me.ryanhamshire.GriefPrevention.DataStore - getPlayerData(UUID) (returns the one cached PlayerData and records every call), savePlayerData(UUID, PlayerData), savePlayerDataSync(UUID, PlayerData). Knobs: throwOnSavePlayerData (OutOfMemoryError and RuntimeException variants), throwOnSavePlayerDataSync (Error and RuntimeException variants), swallowWriteSilently (the sync/async call returns normally but the simulated disk is NOT updated - models GriefPrevention's catch(Exception)), simulatedDisk (a Map<UUID,Integer> of the bonus value the file holds), pendingStaleWriter (captures the live pool value NOW, and flushStaleWriter() writes that captured value to simulatedDisk later - this models the in-flight SavePlayerDataThread that read at overrideSavePlayerData offset 43 and writes after our rollback), and a call log of every save with the value the live object held at that moment.",
+   "me.ryanhamshire.GriefPrevention.PlayerData - private Integer bonusClaimBlocks (non-volatile), a claims list, getBonusClaimBlocks(), setBonusClaimBlocks(Integer), getClaims(), getRemainingClaimBlocks(). getClaims() must faithfully model the verified bytecode: return immediately when claims != null; otherwise assign the list FIRST and then, if fixNegativeDeficit > 0, apply bonusClaimBlocks += deficit exactly once. Knobs: lazyLoadReturnsZero (models the five-failed-retries default that silently yields 0), lazyLoadThrows, fixNegativeDeficit, remainingOverride (including 0 and Integer.MAX_VALUE for the mapped-overflow rows), throwOnGetClaims, throwOnGetRemaining, setterThrows (must never fire - asserting it does not is how the harness proves every setter call receives a pre-existing Integer), getClaimsCallCount, and an ordered log of every getter/setter call.",
+   "A recording java.util.logging.Handler installed on the Logger passed to BarterService, capturing (level, message, thrown, suppressed[]) for every record, so every expect_log_contains assertion and every forbidden-substring assertion runs against the real formatted text.",
+   "A Harness main under the scratch directory that copies InvalidSettingException, BarterSettings, Messages and the NEW BarterService out of the repo (the repo itself is never modified), compiles them together with the stubs via javac into a scratch classes directory, and runs every injection twice - once with mirrorSemantics=true and once with mirrorSemantics=false - asserting the invariants below on each run."
+  ],
+  "injections": [
+   {
+    "id": "BUY-HAPPY",
+    "description": "Baseline purchase with room in the inventory and a healthy save.",
+    "setup": "64 plain currency in slot 0, bonus=500, blocksPerItem=100, no knobs.",
+    "action": "buy(player, 2)",
+    "expect_items": "inventory currency 64 -> 62; nothing dropped.",
+    "expect_blocks": "live pool 500 -> 700; savePlayerData called exactly once with the live object holding 700; simulatedDisk 700.",
+    "expect_result_key": "bought",
+    "expect_log_contains": "INFO '<name> bought 200 claim blocks for 2 iron ingots; bonus pool 500 -> 700'; no SEVERE, no WARNING."
+   },
+   {
+    "id": "BUY-REFUSE-NO-ITEMS",
+    "description": "Refusal before the store is even resolved.",
+    "setup": "3 currency held, bonus=0.",
+    "action": "buy(player, 10)",
+    "expect_items": "unchanged (3).",
+    "expect_blocks": "unchanged; setBonusClaimBlocks never called; savePlayerData never called; getClaims never called (the warm must not run before the refusal).",
+    "expect_result_key": "not-enough-items",
+    "expect_log_contains": "nothing logged at any level."
+   },
+   {
+    "id": "BUY-REFUSE-OVERFLOW-NEGATIVE-POOL",
+    "description": "A legitimately negative pool makes blocks exceed int range while updated does not - the guard grafted from the pre-committed design.",
+    "setup": "bonus = -2_000_000_000, blocksPerItem = 1_000_000, 3000 currency held.",
+    "action": "buy(player, 3000)",
+    "expect_items": "unchanged.",
+    "expect_blocks": "unchanged; no setter call.",
+    "expect_result_key": "overflow",
+    "expect_log_contains": "nothing logged."
+   },
+   {
+    "id": "BUY-SAVE-OOM-CLEAN-UNWIND",
+    "description": "The realistic failure: Thread.start cannot create a native thread. Full unwind, full refund.",
+    "setup": "64 currency, bonus=500, DataStore.throwOnSavePlayerData = OutOfMemoryError, inventory has free slots.",
+    "action": "buy(player, 2)",
+    "expect_items": "currency back to 64; refund placed in the inventory, nothing dropped; deliver reports delivered == 2.",
+    "expect_blocks": "live pool back to 500 via the PRE-BOXED restore value (assert setBonusClaimBlocks received the same Integer identity that was boxed in PREPARE); savePlayerDataSync called exactly once AFTER the refund; setterThrows never fired.",
+    "expect_result_key": "none - the OutOfMemoryError is rethrown; the harness asserts the throw and that no Result was produced.",
+    "expect_log_contains": "one SEVERE containing '2 iron ingots requested, 2 taken, 2 returned', 'granted 200 and undone in memory, pool now 500', 'GriefPrevention swallows write failures, so this does not confirm what the file holds', and 'Verify the player's file: if it shows bonus=700'. Must NOT contain 'Nothing is left to fix by hand' and must NOT contain the word 'written' as a claim about the file."
+   },
+   {
+    "id": "BUY-SAVE-OOM-STALE-WRITER-WINS",
+    "description": "The chosen design's one repairable hard break: an in-flight GriefPrevention writer captured the abandoned grant and flushes after the synchronous rollback.",
+    "setup": "As BUY-SAVE-OOM-CLEAN-UNWIND, plus DataStore.pendingStaleWriter armed to capture the live pool the instant setBonusClaimBlocks(700) lands, and flushStaleWriter() invoked by the stub immediately after savePlayerDataSync returns.",
+    "action": "buy(player, 2)",
+    "expect_items": "currency back to 64.",
+    "expect_blocks": "live pool 500 (correct); simulatedDisk 700 (the mint the plugin cannot prevent). The harness asserts the plugin itself never WROTE a value above 500 after the undo - only the stale writer did.",
+    "expect_result_key": "none - OutOfMemoryError rethrown.",
+    "expect_log_contains": "the SEVERE must contain 'Verify the player's file: if it shows bonus=700' and the exact command '/adjustbonusclaimblocks <name> -200'. This injection is the regression test for the false all-clear."
+   },
+   {
+    "id": "BUY-REMOVECURRENCY-THROWS-PARTWAY",
+    "description": "setStorageContents dies after writing part of the array; the number actually taken is unknown a priori.",
+    "setup": "64 currency across two slots, PlayerInventory.throwInSetStorageContentsAfterSlotK = 1 (Error). Run under BOTH mirror semantics.",
+    "action": "buy(player, 40)",
+    "expect_items": "whatever the stub actually removed (K) is measured by the diff and refunded; final inventory currency == 64 under both semantics.",
+    "expect_blocks": "pool untouched; setBonusClaimBlocks never called; savePlayerDataSync never called.",
+    "expect_result_key": "none - the Error is rethrown.",
+    "expect_log_contains": "one SEVERE containing '<K> taken', '<K> returned', 'claim blocks: never granted', 'durable write: not attempted; nothing of this trade was ever written', and 'Fix by hand: nothing'."
+   },
+   {
+    "id": "BUY-TAKE-THROWS-AND-RECOUNT-THROWS",
+    "description": "itemsTaken is UNKNOWN, so the refund must be deliberately skipped rather than guessed.",
+    "setup": "throwInSetStorageContentsAfterSlotK = 1 (Error) and throwOnGetStorageContentsCallN set so the measuring recount also throws.",
+    "action": "buy(player, 40)",
+    "expect_items": "no refund attempted: addItem and dropItemNaturally were never called (assert the World and Inventory call logs are empty for this phase).",
+    "expect_blocks": "pool untouched.",
+    "expect_result_key": "none - Error rethrown.",
+    "expect_log_contains": "SEVERE containing 'an unknown number taken', '0 returned (the refund was deliberately skipped)' and 'Inspect the inventory: up to 40 iron ingots may be missing and were not refunded automatically.'"
+   },
+   {
+    "id": "BUY-UNDO-OUT-OF-RANGE-GRANT-STANDS",
+    "description": "The pool moved and the relative correction falls outside int range, so the grant cannot be undone. The refund must be skipped, because a refund beside a live grant is a mint.",
+    "setup": "bonus near Integer.MIN_VALUE, blocksPerItem large, throwOnSavePlayerData = OutOfMemoryError, and the PlayerData stub mutates the pool from a simulated foreign writer between the grant and the undo.",
+    "action": "buy(player, 1)",
+    "expect_items": "NOT refunded - addItem/dropItemNaturally never called for the refund.",
+    "expect_blocks": "the grant stands in memory; savePlayerDataSync IS called (the purchase is a completed-but-unsaved trade).",
+    "expect_result_key": "none - Error rethrown.",
+    "expect_log_contains": "SEVERE containing 'granted ... and NOT undone', '0 returned (the refund was deliberately skipped)' and 'The purchase stands: the items are the payment and the blocks were kept.'"
+   },
+   {
+    "id": "BUY-POOL-MOVED-BEFORE-MUTATION",
+    "description": "The PREPARE re-read catches a foreign write; this must be a refusal, never a rollback.",
+    "setup": "The PlayerData stub bumps the pool once, between the warm and the PREPARE re-read.",
+    "action": "buy(player, 2)",
+    "expect_items": "unchanged - removeCurrency never called.",
+    "expect_blocks": "unchanged by the plugin; setBonusClaimBlocks never called.",
+    "expect_result_key": "transaction-failed",
+    "expect_log_contains": "WARNING containing 'bonus pool changed from' and 'refused and nothing was charged'; no SEVERE."
+   },
+   {
+    "id": "BUY-SILENT-WRITE-FAILURE",
+    "description": "The save thread starts, the write is swallowed, and nothing reports it - the API ceiling.",
+    "setup": "DataStore.swallowWriteSilently = true.",
+    "action": "buy(player, 2)",
+    "expect_items": "currency 64 -> 62.",
+    "expect_blocks": "live pool 700; simulatedDisk still 500. The harness asserts the plugin makes no claim about the file anywhere.",
+    "expect_result_key": "bought",
+    "expect_log_contains": "the INFO reconciliation line 'bonus pool 500 -> 700'; no SEVERE; and the whole captured log must not contain any assertion that the data was saved."
+   },
+   {
+    "id": "BUY-LAZY-LOAD-ZERO",
+    "description": "The documented silent data-loss path: an unreadable player file yields bonus=0 and the purchase makes it durable.",
+    "setup": "PlayerData.lazyLoadReturnsZero = true while simulatedDisk holds 500.",
+    "action": "buy(player, 2)",
+    "expect_items": "currency 64 -> 62.",
+    "expect_blocks": "live pool 200; simulatedDisk 200 (the prior 500 erased). Recorded as expected-and-undetectable, not as a pass/fail of the plugin.",
+    "expect_result_key": "bought",
+    "expect_log_contains": "the INFO line 'bonus pool 0 -> 200', which is the only reconciliation handle; no WARNING from the warm (before and after are both 0)."
+   },
+   {
+    "id": "BUY-DATASTORE-NULL",
+    "description": "The kept defence-in-depth guard.",
+    "setup": "GriefPrevention.instance.dataStore = null.",
+    "action": "buy(player, 2)",
+    "expect_items": "unchanged.",
+    "expect_blocks": "unchanged.",
+    "expect_result_key": "data-unavailable",
+    "expect_log_contains": "exactly one WARNING (never SEVERE) containing 'Refused a purchase for' and 'data store is unavailable'."
+   },
+   {
+    "id": "WARM-DISARMS-SAVE-THREAD",
+    "description": "Proves the central graft: after the warm, a later getClaims (the one SavePlayerDataThread.run makes) cannot re-enter the fix-negative branch.",
+    "setup": "PlayerData.fixNegativeDeficit = 445, claims null at the start. The DataStore stub calls getClaims() on the PlayerData inside savePlayerData, exactly as the verified run() body does.",
+    "action": "buy(player, 1)",
+    "expect_items": "normal purchase.",
+    "expect_blocks": "the +445 credit is applied exactly ONCE, during the warm and BEFORE the snapshot, so the grant is computed on top of it; the simulated save thread's getClaims adds nothing. Assert getClaimsCallCount >= 2 and that the credit was applied once.",
+    "expect_result_key": "bought",
+    "expect_log_contains": "exactly one WARNING 'GriefPrevention corrected <name>'s bonus pool from B to B+445 while preparing a purchase; ClaimBarter did not write this'."
+   },
+   {
+    "id": "SELL-HAPPY",
+    "description": "Baseline sale with room in the inventory.",
+    "setup": "bonus=1000, remainingOverride=1000, blocksPerItem=100, refundRatio=1.0, empty inventory.",
+    "action": "sell(player, 500)",
+    "expect_items": "5 currency placed in the inventory, nothing dropped.",
+    "expect_blocks": "live pool 1000 -> 500; savePlayerData called once BEFORE any addItem call (assert the interleaved call log ordering); simulatedDisk 500.",
+    "expect_result_key": "sold",
+    "expect_log_contains": "INFO '<name> sold 500 claim blocks for 5 iron ingots; bonus pool 1000 -> 500'; no SEVERE."
+   },
+   {
+    "id": "SELL-SAVE-OOM-CLEAN-UNWIND",
+    "description": "Deduction undone, nothing paid out.",
+    "setup": "bonus=1000, throwOnSavePlayerData = OutOfMemoryError.",
+    "action": "sell(player, 500)",
+    "expect_items": "none paid - addItem and dropItemNaturally never called.",
+    "expect_blocks": "live pool back to 1000 via the pre-boxed restore value; savePlayerDataSync called once.",
+    "expect_result_key": "none - OutOfMemoryError rethrown.",
+    "expect_log_contains": "SEVERE containing 'deducted 500 claim blocks in memory, undone', 'no items were paid out', 'does not confirm what the file holds' and 'Verify the player's file: if it shows bonus=500'."
+   },
+   {
+    "id": "SELL-UNDO-FAILS-DEDUCTION-STANDS",
+    "description": "The unpaid deduction must NOT be made durable by this plugin.",
+    "setup": "bonus near Integer.MAX_VALUE so the relative correction overflows int, throwOnSavePlayerData = OutOfMemoryError.",
+    "action": "sell(player, <large>)",
+    "expect_items": "none paid.",
+    "expect_blocks": "the deduction stands in memory; assert savePlayerDataSync was NEVER called.",
+    "expect_result_key": "none - Error rethrown.",
+    "expect_log_contains": "SEVERE containing 'NOT undone', 'durable write: skipped deliberately, so this plugin did not make the unpaid deduction durable' and 'Give the blocks back: run /adjustbonusclaimblocks <name> <blocks>'."
+   },
+   {
+    "id": "SELL-PAYOUT-ALL-DROPS-CANCELLED",
+    "description": "Review #6: a cancelled spawn must never be counted as delivered.",
+    "setup": "freeSlots = 0 so everything goes to the drop path; World.cancelDropNumberN set for every drop.",
+    "action": "sell(player, 500)",
+    "expect_items": "0 reach the player; dropped entities all report isValid()==false.",
+    "expect_blocks": "pool 1000 -> 500 and the save started - the sale itself is correct and is NOT unwound.",
+    "expect_result_key": "items-lost with lost=5 and item='iron ingots'",
+    "expect_log_contains": "SEVERE containing '0 confirmed', '5 lost and must be restored by hand' and 'nothing threw, so a drop was most likely destroyed by another plugin cancelling ItemSpawnEvent'."
+   },
+   {
+    "id": "SELL-PAYOUT-ADDITEM-THROWS-AFTER-PARTIAL",
+    "description": "Review #12, the half the current code leaves open: a THROWING addItem must be credited for what it placed.",
+    "setup": "throwInAddItemAfterPlacingK = 3 (Error) on the first chunk; blocksPerItem/refundRatio chosen so items = 5.",
+    "action": "sell(player, 500)",
+    "expect_items": "3 in the inventory; the inventory diff must report placed == 3, NOT 0 and NOT 5.",
+    "expect_blocks": "pool 1000 -> 500, save started.",
+    "expect_result_key": "none - the Error from deliver is rethrown by S12; the harness asserts the throw AND that deliver's SEVERE was written first.",
+    "expect_log_contains": "deliver SEVERE containing '3 confirmed (3 into the inventory, 0 dropped at their feet)' and '2 lost and must be restored by hand'."
+   },
+   {
+    "id": "SELL-PAYOUT-LISTENER-SHRINKS-DROP",
+    "description": "Graft G4, shrink direction: a listener resizes the spawned entity down and the loss must be reported.",
+    "setup": "freeSlots = 0; World.shrinkDropNumberNTo(1) for a drop handed 5.",
+    "action": "sell(player, 500)",
+    "expect_items": "only 1 item actually on the ground; dropped credited 1, not 5.",
+    "expect_blocks": "pool 1000 -> 500, save started.",
+    "expect_result_key": "items-lost with lost=4",
+    "expect_log_contains": "SEVERE containing '1 confirmed' and '4 lost and must be restored by hand'."
+   },
+   {
+    "id": "SELL-PAYOUT-LISTENER-MERGES-DROP-THEN-CANCEL",
+    "description": "Graft G4, merge direction: an inflated merge must not mask a later destroyed stack.",
+    "setup": "items = 2 chunks; World.growDropNumberNTo(128) on chunk 1 (which was handed 64) and cancelDropNumberN on chunk 2 (handed 64); freeSlots = 0.",
+    "action": "sell(player, <blocks for 128 items>)",
+    "expect_items": "chunk 1 credited at most the 64 handed over (the cap), chunk 2 credited 0.",
+    "expect_blocks": "pool deducted, save started.",
+    "expect_result_key": "items-lost with lost=64 - the cancelled chunk must NOT be masked by the merge.",
+    "expect_log_contains": "SEVERE containing '64 confirmed' and '64 lost and must be restored by hand'."
+   },
+   {
+    "id": "SELL-PAYOUT-LISTENER-TELEPORTS",
+    "description": "Review #11: world and location must be re-read for every drop.",
+    "setup": "freeSlots = 0; teleportPlayerOnDropN = 1 (swaps both the Location and the World).",
+    "action": "sell(player, <blocks for 3 chunks>)",
+    "expect_items": "all chunks delivered; assert the World stub's call log shows the FIRST drop at the original world/location and every subsequent drop at the new one.",
+    "expect_blocks": "pool deducted, save started.",
+    "expect_result_key": "sold",
+    "expect_log_contains": "no SEVERE (nothing was lost)."
+   },
+   {
+    "id": "SELL-PAYOUT-KICK-MID-PAYOUT",
+    "description": "Graft G5: the loop stops and the remainder is truthfully reported lost rather than pushed at a disconnected player.",
+    "setup": "freeSlots = 0; kickPlayerOnDropN = 1 flips connected to false; items = 3 chunks.",
+    "action": "sell(player, <blocks for 3 chunks>)",
+    "expect_items": "chunk 1 delivered; chunks 2 and 3 never attempted (assert the World call log has exactly one entry).",
+    "expect_blocks": "pool deducted, save started.",
+    "expect_result_key": "items-lost with the remainder as lost",
+    "expect_log_contains": "SEVERE naming the confirmed and lost counts; must NOT claim any un-attempted chunk was delivered."
+   },
+   {
+    "id": "SELL-PAYOUT-DROP-THROWS-UNCONFIRMED",
+    "description": "The in-flight stack whose drop call threw is reported as not received, and the operator is told to look at the ground first.",
+    "setup": "freeSlots = 0; throwOnDropNumberN = 2, run once as a RuntimeException and once as an Error.",
+    "action": "sell(player, <blocks for 3 chunks>)",
+    "expect_items": "chunk 1 credited; chunk 2's amount lands in unconfirmed and is credited 0; chunk 3 never attempted.",
+    "expect_blocks": "pool deducted, save started.",
+    "expect_result_key": "RuntimeException variant: items-lost with lost = items - delivered (the unconfirmed stack counted as not received). Error variant: the Error is rethrown by S12 after deliver logged.",
+    "expect_log_contains": "SEVERE containing 'in a stack whose drop threw and may or may not be on the ground' and 'check the ground at the player's position before restoring'."
+   },
+   {
+    "id": "INFO-WARM-APPLIES-FIX",
+    "description": "Review #14 plus the info() auditability graft: a read-only lookup must never return a trade key, and the two numbers must describe one state.",
+    "setup": "PlayerData.fixNegativeDeficit = 50, claims null; remainingOverride computed from the post-fix pool.",
+    "action": "info(player)",
+    "expect_items": "unchanged; addItem and dropItemNaturally never called.",
+    "expect_blocks": "the +50 credit is GriefPrevention's and is applied once during the warm; the plugin never calls setBonusClaimBlocks and never calls savePlayerData.",
+    "expect_result_key": "info - and the harness asserts info() can never return transaction-failed, items-lost, bought or sold under ANY knob combination.",
+    "expect_log_contains": "exactly one WARNING 'GriefPrevention corrected <name>'s bonus pool from B to B+50 while preparing a rate lookup; ClaimBarter did not write this'."
+   },
+   {
+    "id": "INFO-DATASTORE-NULL",
+    "description": "The only failure key info() may return.",
+    "setup": "GriefPrevention.instance = null.",
+    "action": "info(player)",
+    "expect_items": "unchanged.",
+    "expect_blocks": "unchanged.",
+    "expect_result_key": "data-unavailable",
+    "expect_log_contains": "one WARNING containing 'Refused a rate lookup for'; never SEVERE, because this is repeatable at will with no permission and no cooldown."
+   },
+   {
+    "id": "METADATA-STACKS-NEVER-SPENT",
+    "description": "The CLAUDE.md invariant that only plain stacks in the main inventory are currency.",
+    "setup": "Slot 0 holds 64 currency with hasItemMeta = true; slot 1 holds 10 plain currency.",
+    "action": "buy(player, 5) and, separately, a forced refund path",
+    "expect_items": "the metadata stack is untouched in every injection and is never counted; only the 10 plain ones can be spent.",
+    "expect_blocks": "computed from the plain count only.",
+    "expect_result_key": "bought (5 <= 10)",
+    "expect_log_contains": "nothing; the assertion is on the inventory state, and it must hold under BOTH mirror semantics."
+   },
+   {
+    "id": "NO-INVENTED-KEYS",
+    "description": "Cross-cutting guard against the writer inventing a key, which would render 'Missing message: <key>' on any upgraded server (reviews #15/#16).",
+    "setup": "Run EVERY injection above with a Messages built from the shipped config.yml and record every key returned in a Result.",
+    "action": "all of the above",
+    "expect_items": "n/a",
+    "expect_blocks": "n/a",
+    "expect_result_key": "every returned key must be a member of the exact set {bought, sold, info, transaction-failed, items-lost, data-unavailable, not-enough-items, not-enough-blocks, blocks-in-use, selling-disabled, amount-too-small, limit-reached, invalid-amount, overflow}, and the rendered Component must never contain the substring 'Missing message'.",
+    "expect_log_contains": "n/a"
+   }
+  ],
+  "invariants_checked_every_case": [
+   "ITEMS CONSERVED OR TRUTHFULLY SHORT: (plain currency in the 36 storage slots at the end) + (the amount held by every valid dropped Item entity) + (the number reported lost to the player, or named in the SEVERE when an Error was rethrown instead) == (plain currency at the start) + (the trade's intended net item delta). The reported loss is never LESS than the true shortfall (that would be a silent loss) and never MORE (that would make a manual restore duplicate), with the single documented exception of the one unconfirmed stack, which must be labelled as unconfirmed in the log.",
+   "BLOCKS NEVER ABOVE THE CORRECT VALUE: the live pool at the end is <= the correct post-trade value, and every value the PLUGIN passed to setBonusClaimBlocks (from the recorded call log) is <= the correct value. Where the harness models GriefPrevention's own unordered stale writer, the simulated disk is allowed to exceed it, but only when the SEVERE contains the verify-the-file clause naming that exact value and the exact /adjustbonusclaimblocks command.",
+   "RESULT KEY TRUTHFUL FOR THE FINAL STATE: bought/sold only when the full item amount and the full block amount moved; transaction-failed only when the plugin's net effect on both the pool and the inventory is zero; items-lost only with a measured count that matches the harness's own independent accounting; data-unavailable only when the store was null; and where none of those is true, the call must THROW rather than return a Result.",
+   "NO PLAYER-FACING STRING ORIGINATES IN JAVA: the Component rendered for the returned key must equal prefix + the shipped config.yml template with the placeholders substituted, and must never contain 'Missing message'. Every SEVERE/WARNING/INFO record goes to the Logger and never to Player.sendMessage.",
+   "PRE-BOXED SETTER: PlayerData.setterThrows is armed in every run and must never fire, and the setter call log must show that every argument was an Integer object created before the first mutation of that trade (identity comparison against the PREPARE boxes) or, on the relative-correction branch only, a fresh box created in a guarded step.",
+   "NO ALLOCATION-BEARING CALL BETWEEN THE TAKE AND THE GRANT: the interleaved stub call log for buy must show setStorageContents immediately followed by setBonusClaimBlocks with no getPlayerData, getClaims, lazy load, ItemStack construction or message render in between.",
+   "ORDERING: on buy, the last inventory mutation precedes the first setBonusClaimBlocks; on sell, setBonusClaimBlocks and savePlayerData both precede the first addItem or dropItemNaturally. Asserted from the interleaved call log, not from the source.",
+   "EVERY COMPENSATION STEP RAN: when a failure was injected, the call log must show the undo attempt (if blocksMutated), then the refund attempt (unless deliberately skipped, in which case the log must say so), then persistRollback (per its own gating rule), then exactly one summary record - in that order, with no step missing because a later one threw.",
+   "FORBIDDEN SUBSTRINGS: no captured record may contain 'Nothing is left to fix by hand' when a pool mutation was applied, nor any phrasing asserting that data WAS written to disk, nor a 'took back'/'gave back' claim when the corresponding ledger flag is false.",
+   "BOTH INVENTORY SEMANTICS: every injection is run twice, once with getStorageContents returning the live array and once with it returning defensive copies, and every assertion above must hold identically in both runs."
+  ]
+ },
+ "unresolved_disagreements": [
+  "RETHROW vs RETURN on an unwound failure. The chosen design rethrows the first Error after compensation and logging (matching the code on the branch today), which means the player gets the dispatcher's generic error rather than items-lost/transaction-failed. 'Measured Unwind' argued the opposite: since Error is the ONLY failure reachable inside the mutation against 16.18.7 bytecode, rethrowing makes the items-lost and transaction-failed branches dead code and denies the player the measured count that the plugin worked to produce. Both positions are internally consistent and the evidence does not settle which the project wants. The spec DEFAULTS TO RETHROW so the writer has no decision to make; a human ruling the other way needs only to change U7 and SU6 to fall through to the Result.",
+  "SYNCHRONOUS FORWARD COMPLETION. 'Take, grant, persist forward' proposed that when store.savePlayerData throws (native-thread exhaustion, which leaves the heap usable), the plugin call store.savePlayerDataSync instead and COMPLETE the trade rather than unwind it - which is what GriefPrevention's own onDisable does. That would make the realistic failure a success with a durable write, and would leave the unwind for heap exhaustion only; on a sale it is strictly better for the player than refusing to pay out. It is excluded here solely because requirement (6) as relayed permits synchronous file I/O on the rollback path only, and this puts a main-thread write on a path ending in ok(\"bought\")/ok(\"sold\"). If the human relaxes (6) to 'no synchronous I/O when the asynchronous save succeeded', B10-B11 and S10 gain a sync fallback and the unwind runs only when both saves threw. This is a product decision, not an evidence question.",
+  "SEVERE LOG FLOOD. A player with no cooldown, a full inventory and a region where another plugin cancels ItemSpawnEvent can emit one SEVERE per sell indefinitely. The spec keeps SEVERE because the shortfall is genuine item loss, which SECURITY.md treats as a vulnerability, and the existing dataStore() precedent for WARNING applies to a case where nothing moved. The alternatives - downgrade to WARNING (loses a security-relevant alert), rate-limit (new state in a class that is rebuilt on every reload), or add a per-player cooldown (a feature outside ROADMAP scope) - all have costs the reviewers split on. Needs a human call.",
+  "THE UNCONFIRMED STACK. When dropItemNaturally throws after the entity may already have been added, the spec reports that stack to the player as NOT received and tells the operator to check the ground before restoring. This over-reports the loss by at most one stack, which risks duplication if the operator restores without looking; the opposite choice risks a silent loss. Attackers split on which direction is safer and no bytecode settles it, because whether a listener exception can propagate out of dropItemNaturally is decided by the server-side PaperEventManager, which is not in ~/.m2.",
+  "THE PER-TRADE INFO LINE. It is the only handle an operator has for reconciling a GriefPrevention-swallowed write failure against a specific trade, and it is also one log line per trade on a busy server. Keep, downgrade to FINE, or drop - a server-operations preference, not a correctness question.",
+  "FIVE LIVE-SERVER FACTS the spec depends on and that ~/.m2 cannot prove, which CLAUDE.md requires verifying on a real Paper server next to GriefPrevention before this change is reported as verified: isValid() == false for an entity whose ItemSpawnEvent was cancelled; addItem placing only into the 36 storage slots; whether getStorageContents returns copies or write-through mirrors; whether a listener exception propagates out of dropItemNaturally; and whether Item.getItemStack() reflects a listener's setItemStack (graft G4's cap depends on this last one). The harness runs every injection under both inventory semantics, but the other four can only be settled in-game.",
+  "THE UNORDERED-WRITER MINT. Two unsynchronized truncating writers of the same player file cannot be ordered from a plugin: overrideSavePlayerData is not synchronized, bonusClaimBlocks is non-volatile, and no happens-before edge reaches a thread that is already running. All four candidate designs carry this, and the spec only guarantees ordering against writers that start later while naming the value to verify. Closing it properly needs either per-player save serialization inside GriefPrevention or a plugin-owned durable ledger reconciled on player join - both well outside BarterService.java and outside the ROADMAP's stated scope. The human should decide whether that is acceptable as a documented limitation or whether it belongs on the roadmap.",
+  "INVENTORY DIFF vs SNAPSHOT REFUND. 'Pre-committed unwind with snapshot refund' would deep-clone the 36 slots before the take and restore them with one setStorageContents on failure, removing addItem, drops and ItemSpawnEvent from the buy unwind entirely. It is a genuinely smaller failure surface, but it makes correctness depend on getStorageContents copy-vs-mirror semantics and on ItemStack.clone() detaching from a mirror, neither of which the API jar states. The spec keeps the measured deliver() path because its accounting is already exact and degrades to a logged loss rather than a silent one. If the live-server check establishes that getStorageContents returns copies, the snapshot refund becomes strictly better and is worth revisiting."
+ ]
+}
