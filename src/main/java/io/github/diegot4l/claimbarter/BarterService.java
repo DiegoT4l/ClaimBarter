@@ -66,7 +66,8 @@ final class BarterService
         long blocks = (long) items * settings.blocksPerItem();
         UUID playerId = player.getUniqueId();
         PlayerData data = GriefPrevention.instance.dataStore.getPlayerData(playerId);
-        long updated = (long) data.getBonusClaimBlocks() + blocks;
+        int purchased = data.getBonusClaimBlocks();
+        long updated = (long) purchased + blocks;
 
         if (updated > Integer.MAX_VALUE)
         {
@@ -88,6 +89,16 @@ final class BarterService
         }
         catch (RuntimeException failure)
         {
+            // Not the disk-failure path: savePlayerData starts a thread and
+            // returns, and FlatFileDataStore swallows the write's own failure,
+            // so an I/O error never arrives here. What does arrive is the
+            // dataStore going away mid-tick. PlayerData is GriefPrevention's
+            // live cached object, so without this the grant above would outlive
+            // the failure and a later save would persist blocks nobody paid
+            // for. Undone before the refund because this cannot throw and
+            // minting is the worse half of the trade to leave behind, and
+            // because sell() unwinds in the same order.
+            data.setBonusClaimBlocks(purchased);
             giveCurrency(player, items);
             logger.log(Level.SEVERE, "Purchase failed for " + player.getName() + "; items refunded", failure);
             return Result.fail("transaction-failed");
