@@ -78,4 +78,6 @@ messages:
   players-only: "&cThis command has to be run by a player."
   usage: "&7Usage: &f/claimbarter buy <items> &7| &fsell <blocks> &7| &finfo"
   reloaded: "&aConfiguration reloaded."
-  transaction-failed: "&cThe trade failed and your items were returned. Tell an admin."
+  # Sent for a failed purchase and a failed sale alike, so the wording cannot
+  # promise items back: on a sale none were ever handed over.
+  transaction-failed: "&cThe trade failed and was rolled back. Nothing was charged. Tell an admin."
