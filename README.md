@@ -80,6 +80,23 @@ existing `config.yml`, so **if you previously wrote `{item}s` in a message to
 work around the missing plural, remove that `s`** — it now renders `ingotss`.
 Untouched messages need no change.
 
+**Upgrading from 1.0.1 or earlier: add two message keys by hand.** Message keys
+have no built-in defaults, and the same `saveDefaultConfig()` rule means an
+existing `config.yml` never gains new ones. Without them a player who hits one
+of these outcomes sees `Missing message: items-lost`. Add under `messages:`:
+
+```yaml
+  items-lost: "&cSomething went wrong and &f{lost} {item}&c did not reach you. Tell an admin."
+  data-unavailable: "&cClaim data is unavailable right now. Try again in a moment."
+```
+
+Also replace `transaction-failed`. The old text promises the items were
+returned, which is not true of a failed sale, where none were ever handed over:
+
+```yaml
+  transaction-failed: "&cThe trade failed and was rolled back. Nothing was charged. Tell an admin."
+```
+
 Bad values are refused at load with a specific reason in the console, and the
 plugin disables itself rather than running on a configuration it cannot honour.
 
