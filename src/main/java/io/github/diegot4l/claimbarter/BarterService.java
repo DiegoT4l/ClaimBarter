@@ -18,44 +18,103 @@ import java.util.logging.Logger;
 /**
  * Every trade between items and GriefPrevention claim blocks.
  *
- * <p>The ordering inside each transaction is deliberate. On a purchase the
- * items are taken first and the blocks granted second, so a failure cannot
- * mint blocks for free; on a sale the blocks are removed and persisted first
- * and the items handed over second, so a failure cannot duplicate items.
- * Either way the loser of a crash is the plugin, never the server.
+ * <p>The promises below are the only ones this class makes. Each is worded to
+ * what GriefPrevention 16.18.7's bytecode supports rather than to what would
+ * be convenient to believe, because an operator who trusts a promise the code
+ * cannot keep stops looking exactly where the damage is.
  *
- * <p>What that promise does not cover is worth stating plainly, because the
- * limits live in GriefPrevention 16.18.7 rather than here.
+ * <p>A trade that cannot be completed is refused before anything moves: every
+ * read, every ceiling check and the pool re-read all happen before the first
+ * mutation. A refusal needs no unwinding, so everything decided up front is
+ * something that cannot depend on compensation that might itself fail.
  *
- * <p><b>A write failure is invisible.</b> DataStore.savePlayerData only starts
- * a thread, and FlatFileDataStore.overrideSavePlayerData wraps the write in
- * catch (Exception). A full disk or a permissions fault is logged by
- * GriefPrevention and reported to this plugin as success.
+ * <p>On a purchase the items leave the inventory before the blocks are
+ * granted; on a sale the blocks are deducted and their save started before any
+ * item is handed over. A failure between the two costs the plugin, never the
+ * server.
  *
- * <p><b>A rollback may not reach a save already in flight.</b>
- * overrideSavePlayerData reads getBonusClaimBlocks() at serialization time on
- * its own thread; PlayerData.bonusClaimBlocks is neither volatile nor read
- * under a lock, and overrideSavePlayerData is not synchronized. So a
- * concurrent save can serialize a value this class has already corrected, and
- * re-saving does not help: a second writer truncates the same file with no
- * ordering against the first.
+ * <p>Every allocation the never-mint compensation can need is made before the
+ * first item moves, so undoing a grant or a deduction in memory is a bare
+ * field write that cannot fail. PlayerData.setBonusClaimBlocks(Integer) is
+ * aload_0/aload_1/putfield/return, so once the Integer exists the write cannot
+ * throw. This matters because the realistic failure in a trade is an
+ * OutOfMemoryError, and an undo that allocated could fail for the very reason
+ * the trade did.
  *
- * <p>DataStore.savePlayerDataSync performs the write on the calling thread.
- * It is used for rollbacks and only for rollbacks. On the trade itself it
- * would put file I/O on the main thread on every purchase and every sale, and
- * a stall there is felt by everyone on the server rather than by the one
- * player trading - a cost paid on every success to guard a path that only
- * opens when something has already gone wrong. On the rollback that reasoning
- * inverts: it runs rarely, nothing else is in flight to race, and leaving the
- * correction in memory alone is what the failure above describes.
+ * <p>The never-lose-items compensation allocates by nature. It is guarded and
+ * measured instead of assumed, and the two invariants are reasoned about
+ * separately. Handing items back builds stacks and fires other plugins'
+ * events, so pretending it cannot fail would only hide the count of what did
+ * not arrive.
  *
- * <p>So the guarantee here is narrower, and chosen rather than assumed: a
- * trade that cannot be completed is refused before anything moves, a trade
- * that fails partway is unwound as far as it can be, and nothing is reported
- * to the player as having worked when it did not.
+ * <p>Compensation is driven by a ledger of what actually landed - each flag
+ * set on the line after the call it records, each number measured after the
+ * fact - and every compensation step, log statement and addSuppressed is
+ * individually guarded so no step's failure can skip a later one. An undo
+ * applied for a mutation that never happened is itself the bug: it subtracts
+ * blocks that were never added, or refunds items that were never taken.
+ *
+ * <p>getClaims() is forced on the main thread before the bonus pool is read.
+ * PlayerData.claims is written in only two places, the constructor and
+ * getClaims offset 15, and GriefPrevention's fix-negative credit to
+ * bonusClaimBlocks at offset 428 lives inside the claims == null branch; so
+ * after this call no SavePlayerDataThread this plugin starts can write the
+ * bonus pool. Without it, the first save thread a trade started could credit
+ * the pool on another thread while the trade was still computing from it.
+ *
+ * <p>A rollback written with savePlayerDataSync is ordered only against writes
+ * that START LATER. An asynchronous writer already in flight can still
+ * truncate the file afterwards: overrideSavePlayerData is not synchronized and
+ * reads the pool at serialization time on its own thread.
+ *
+ * <p>savePlayerDataSync is used only on the failure path, never on the trade
+ * itself. There it would put file I/O on the main thread on every purchase and
+ * every sale, and a stall there is felt by everyone on the server rather than
+ * by the one player trading - a cost paid on every success to guard a path
+ * that only opens when something has already gone wrong. On the failure path
+ * that reasoning inverts: it runs rarely, and leaving the correction in memory
+ * alone would leave the file holding whatever the last save serialized.
+ *
+ * <p>No number is reported to a player that the plugin did not measure. Where
+ * no configured message states the outcome truthfully, the plugin throws
+ * rather than bending a key or adding one. A new key would render as a missing
+ * message on every server whose config.yml predates it, because
+ * saveDefaultConfig never overwrites; the server's generic error asserts
+ * nothing, so it cannot be false.
+ *
+ * <p>What this does not promise is stated as plainly, because the limits live
+ * in GriefPrevention rather than here.
+ *
+ * <p><b>A player-data write failure is invisible.</b> Both GriefPrevention
+ * backends catch around the write and only log - FlatFileDataStore catches
+ * Exception, DatabaseDataStore catches SQLException - so savePlayerDataSync
+ * changes ordering and never observability, and nothing here ever claims what
+ * the file holds.
+ *
+ * <p><b>An unreadable player file looks like an empty pool.</b> A lazy load
+ * that cannot parse the player file yields bonus=0 after five retries, and
+ * this plugin cannot tell that from a genuinely empty pool. The per-trade INFO
+ * line, which names the pool before and after, is the only handle an operator
+ * has for spotting it.
+ *
+ * <p><b>The pool is shared, unguarded state.</b> bonusClaimBlocks is a
+ * non-volatile Integer with an unsynchronized getter and setter, and
+ * GriefPrevention writes it too. That is why every undo is decided from a
+ * fresh read of the pool rather than from the value read at the top.
  */
 final class BarterService
 {
+    /**
+     * Stands in for a count the plugin could not measure.
+     *
+     * <p>The ledger is kept in primitives so the unwind does not allocate,
+     * which rules out a nullable Integer. An item count cannot be negative, so
+     * there the sentinel is unambiguous. A bonus pool can legitimately be -1,
+     * so a pool of -1 in a log line is ambiguous; the pool value is only ever
+     * printed, never acted on, so the ambiguity cannot move anything.
+     */
+    private static final int UNKNOWN = -1;
+
     private final BarterSettings settings;
     private final Logger logger;
 
@@ -79,6 +138,52 @@ final class BarterService
         }
     }
 
+    /**
+     * What one handover of items achieved, filled in by {@link #deliver}.
+     *
+     * <p>Created while a trade is being prepared, before anything moves, so
+     * reporting a refund never needs a fresh object in the middle of an unwind
+     * that may itself be running out of heap. Mutable fields rather than a
+     * returned value for the same reason.
+     */
+    private static final class Handover
+    {
+        /**
+         * Items that entered the inventory or existed as a valid entity when
+         * read - not items proven to be in the player's possession.
+         */
+        int delivered;
+
+        /**
+         * The one stack whose drop call threw. It may or may not be on the
+         * ground, so it is not counted as delivered.
+         */
+        int unconfirmed;
+
+        /** What went wrong during the handover; deliver records it rather than throwing. */
+        Throwable failure;
+    }
+
+    /**
+     * Trades items for claim blocks.
+     *
+     * <p>How many items left the inventory is measured by recounting it, not
+     * trusted from removeCurrency, because the measurement has to survive a
+     * throw inside setStorageContents - which is exactly when the answer is not
+     * the amount requested. When only the recount throws, removeCurrency's own
+     * count of the array it wrote is used instead, and the record says so.
+     *
+     * <p>A grant that cannot be undone skips the refund, because handing the
+     * items back beside a live grant is a mint. The items are then the payment
+     * for a purchase that completed but was never saved, so it is persisted as
+     * one and the operator is told how to check it. An unknown number taken
+     * skips the refund too: refunding a guess is either loss or duplication,
+     * and the plugin cannot tell which.
+     *
+     * <p>Errors are rethrown once every compensation step has run. The JVM's
+     * problem is not this plugin's to swallow, and the server's generic error
+     * the player then sees claims nothing about the trade.
+     */
     Result buy(Player player, int items)
     {
         if (items <= 0)
@@ -103,10 +208,21 @@ final class BarterService
         // Widened to long so the ceiling checks below cannot themselves overflow.
         long blocks = (long) items * settings.blocksPerItem();
         UUID playerId = player.getUniqueId();
+        // Fetched once and held for the whole call. clearCachedPlayerData can
+        // orphan a later fetch, and an undo written to an orphaned object
+        // corrects nothing GriefPrevention will ever save.
         PlayerData data = store.getPlayerData(playerId);
-        int bonusBefore = data.getBonusClaimBlocks();
-        long updated = (long) bonusBefore + blocks;
+        int bonusBefore = warmClaimData(data, player, "a purchase");
 
+        // A negative pool, which GriefPrevention's own commands can create,
+        // lets blocks exceed int range while updated does not. A grant that
+        // size could not be expressed as one int correction, by the undo or by
+        // an operator running /adjustbonusclaimblocks.
+        if (blocks > Integer.MAX_VALUE)
+        {
+            return Result.fail("overflow");
+        }
+        long updated = (long) bonusBefore + blocks;
         if (updated > Integer.MAX_VALUE)
         {
             return Result.fail("overflow");
@@ -116,80 +232,343 @@ final class BarterService
             return Result.fail("limit-reached", "limit", settings.maxPurchasedBlocks());
         }
 
-        removeCurrency(inventory, items);
-
-        Throwable failure = null;
-        boolean granted = false;
+        // Everything the unwind can need is allocated here, while a failure
+        // still costs nothing: both Integers the setter will receive, the
+        // refund's result object, the name every log line uses and the count
+        // the take is measured against.
+        Integer grantBox;
+        Integer restoreBox;
+        Handover refund;
+        String name;
+        int beforeTake;
         try
         {
-            data.setBonusClaimBlocks((int) updated);
-            // Set the instant the write lands, because the rollback below is
-            // relative and must not undo a grant that never happened.
-            // setBonusClaimBlocks takes an Integer, so this line autoboxes and
-            // can itself fail under the OutOfMemoryError the catch is for.
-            granted = true;
-            // GriefPrevention does not persist on its own. DataStore.java:1031 is
-            // explicit: "MUST be called after you're done making changes,
-            // otherwise a reload will lose them."
-            store.savePlayerData(playerId, data);
+            grantBox = Integer.valueOf((int) updated);
+            restoreBox = Integer.valueOf(bonusBefore);
+            refund = new Handover();
+            name = player.getName();
+            beforeTake = countCurrency(inventory);
+            // A refusal, not a rollback: a pool that moved before anything
+            // was charged is left exactly as it is, so a foreign change can
+            // never be overwritten with a stale total.
+            if (data.getBonusClaimBlocks() != bonusBefore)
+            {
+                logger.warning(name + "'s bonus pool changed from " + bonusBefore
+                        + " while preparing a purchase; the purchase was refused and nothing was charged");
+                return Result.fail("transaction-failed");
+            }
+        }
+        catch (Throwable prepFailure)
+        {
+            // Named by UUID: getName() may be the call that just threw, and a
+            // second throw here would escape without the record. Nothing has
+            // moved, so a record lost to the logger strands nothing either.
+            try
+            {
+                logger.log(Level.SEVERE, "Refused a purchase for " + playerId
+                        + ": the transaction could not be prepared; nothing moved", prepFailure);
+            }
+            catch (Throwable ignored)
+            {
+                // See above.
+            }
+            return Result.fail("transaction-failed");
+        }
+
+        int itemsTaken = 0;
+        int removed = UNKNOWN;
+        boolean recountFailed = false;
+        boolean blocksMutated = false;
+        // Recorded so the ledger names every call it covers. Nothing branches
+        // on it: the save is the last call in its try, so it is true exactly
+        // when that try completed and failure is still null.
+        boolean saveStarted = false;
+        boolean poolRestored = false;
+        boolean refundSkipped = false;
+        int returned = 0;
+        int liveAfter = UNKNOWN;
+        Throwable failure = null;
+        Throwable undoFailure = null;
+        Throwable persistFailure = null;
+
+        try
+        {
+            removed = removeCurrency(inventory, items);
         }
         catch (Throwable thrown)
         {
-            // Throwable, not RuntimeException. savePlayerData's whole body is
-            // `new SavePlayerDataThread(...).start()`, and the realistic way
-            // that fails on a loaded server is OutOfMemoryError from native
-            // thread creation - an Error. The items are already gone by here,
-            // so nothing may skip the unwind. Errors are rethrown once it has
-            // run, rather than swallowed.
             failure = thrown;
+        }
+        // Its own try, so the count is still attempted after a throw above;
+        // that is the case where it matters.
+        try
+        {
+            itemsTaken = beforeTake - countCurrency(inventory);
+        }
+        catch (Throwable thrown)
+        {
+            // A removal that returned wrote exactly the array it counted, so
+            // its own figure stands in for the recount. Only when the removal
+            // threw as well is the number truly unknown, and only then is the
+            // refund skipped: withholding a known count would be a sure loss
+            // to avoid an impossible duplication.
+            itemsTaken = removed;
+            recountFailed = true;
+            if (failure == null)
+            {
+                failure = thrown;
+            }
+        }
+        if (failure == null && itemsTaken != items)
+        {
+            failure = new IllegalStateException("the inventory changed between the count and the removal");
         }
 
         if (failure == null)
         {
+            try
+            {
+                data.setBonusClaimBlocks(grantBox);
+                blocksMutated = true;
+                // GriefPrevention does not persist on its own. DataStore.java:1031
+                // is explicit: "MUST be called after you're done making changes,
+                // otherwise a reload will lose them."
+                store.savePlayerData(playerId, data);
+                saveStarted = true;
+            }
+            catch (Throwable thrown)
+            {
+                // Throwable, not RuntimeException. The setter is a bare
+                // putfield against 16.18.7; the realistic throw is
+                // OutOfMemoryError from new SavePlayerDataThread or
+                // Thread.start, after which no thread exists and nothing of
+                // this trade is on disk. The items are already gone by here,
+                // so nothing may skip the unwind.
+                failure = thrown;
+            }
+        }
+
+        if (failure == null)
+        {
+            // Diagnostics only. The trade has completed, so a diagnostic that
+            // fails must not turn it into an error.
+            try
+            {
+                liveAfter = data.getBonusClaimBlocks();
+                if (liveAfter != (int) updated)
+                {
+                    logger.warning("After " + name + "'s purchase the bonus pool reads " + liveAfter
+                            + " in memory but " + updated
+                            + " was written; something outside ClaimBarter wrote it during the trade");
+                }
+            }
+            catch (Throwable ignored)
+            {
+                // The trade stands either way; see above.
+            }
+            // The only handle an operator has for reconciling a write failure
+            // GriefPrevention swallowed against a specific trade.
+            try
+            {
+                logger.info(name + " bought " + blocks + " claim blocks for " + items + " "
+                        + settings.currencyName(items) + "; bonus pool " + bonusBefore + " -> " + updated);
+            }
+            catch (Throwable ignored)
+            {
+                // The trade stands either way; see above.
+            }
             return Result.ok("bought",
                     "blocks", blocks, "items", items, "item", settings.currencyName(items));
         }
 
-        if (granted)
+        // The pool is undone before the refund, so no ItemSpawnEvent listener
+        // fired by the refund can trigger a GriefPrevention save while the
+        // grant is still live.
+        if (blocksMutated)
         {
-            // Subtracts this purchase's own grant rather than writing back the
-            // total read at the top. PlayerData is GriefPrevention's live
-            // shared object, and between that read and here an operator's
-            // /adjustbonusclaimblocks or another plugin may have credited the
-            // same pool; restoring the absolute snapshot would erase it.
-            //
-            // Guarded by the flag because a relative undo is only correct if
-            // the grant landed. Applied unconditionally, a failure in the
-            // setter itself would subtract blocks that were never added and
-            // leave the player below where they started.
-            data.setBonusClaimBlocks(data.getBonusClaimBlocks() - (int) blocks);
+            try
+            {
+                int live = data.getBonusClaimBlocks();
+                if (live == (int) updated)
+                {
+                    // Nothing else wrote the pool, measured just now, so the
+                    // relative and absolute undo coincide and the pre-boxed
+                    // value can be written without allocating. It is not a
+                    // stale snapshot clobbering a foreign change: there is none.
+                    data.setBonusClaimBlocks(restoreBox);
+                    poolRestored = true;
+                }
+                else
+                {
+                    // Someone else credited or debited the pool meanwhile, so
+                    // only this purchase's own grant is taken back.
+                    long relative = (long) live - blocks;
+                    if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE)
+                    {
+                        data.setBonusClaimBlocks(Integer.valueOf((int) relative));
+                        poolRestored = true;
+                    }
+                }
+            }
+            catch (Throwable thrown)
+            {
+                undoFailure = thrown;
+            }
         }
-        // The refund runs before the durable write. The in-memory undo above
-        // has already stopped this session from minting anything; persisting
-        // it is a rarer correction, and it must not be what stands between the
-        // player and the items already taken from them.
-        int returned = deliver(player, items, "refund for a failed purchase");
-        if (granted)
+        else
         {
-            persistRollback(store, playerId, data, player);
+            // Nothing was granted, so there is nothing to restore.
+            poolRestored = true;
         }
-        logger.log(Level.SEVERE, "Purchase failed for " + player.getName()
-                + "; took back the " + blocks + " claim blocks granted and returned "
-                + returned + " of " + items + " item(s)", failure);
 
-        if (failure instanceof Error error)
+        refundSkipped = (blocksMutated && !poolRestored) || itemsTaken == UNKNOWN;
+        if (!refundSkipped && itemsTaken > 0)
         {
-            // The unwind is done; the JVM's problem is not this plugin's to
-            // swallow. The player gets Bukkit's generic error rather than a
-            // count, which is why deliver() has already logged the shortfall.
-            throw error;
+            // deliver never throws; the guard is so a future change to it
+            // cannot strand the durable write and the summary below.
+            try
+            {
+                deliver(player, itemsTaken, "refund for a failed purchase", refund);
+                returned = refund.delivered;
+            }
+            catch (Throwable thrown)
+            {
+                if (refund.failure == null)
+                {
+                    refund.failure = thrown;
+                }
+                else
+                {
+                    suppress(refund.failure, thrown);
+                }
+            }
         }
-        return returned < items
+
+        // After the refund, so a stalled synchronous write cannot delay the
+        // player's items. Runs whether or not the pool was restored: restored,
+        // it writes the correction; not restored, it writes the grant that
+        // stands, because the items were kept as its payment.
+        if (blocksMutated)
+        {
+            persistFailure = persistRollback(store, playerId, data);
+        }
+
+        try
+        {
+            liveAfter = data.getBonusClaimBlocks();
+        }
+        catch (Throwable ignored)
+        {
+            liveAfter = UNKNOWN;
+        }
+
+        suppress(failure, undoFailure);
+        suppress(failure, refund.failure);
+        suppress(failure, persistFailure);
+
+        // One record, composed last and from measured values only, so it
+        // describes the state every step above actually left behind.
+        try
+        {
+            String blocksReport = !blocksMutated
+                    ? "never granted"
+                    : poolRestored
+                            ? "granted " + blocks + " and undone in memory, pool now " + liveAfter
+                            : "granted " + blocks + " and NOT undone, pool now " + liveAfter
+                                    + ", should be " + bonusBefore + " if nothing else wrote it";
+            String writeReport = !blocksMutated
+                    ? "not attempted; nothing of this trade was ever written"
+                    : persistFailure != null
+                            ? "the synchronous write threw"
+                            : "the synchronous write returned; GriefPrevention swallows write failures,"
+                                    + " so this does not confirm what the file holds";
+            StringBuilder fix = new StringBuilder();
+            if (itemsTaken == UNKNOWN)
+            {
+                clause(fix, "Inspect the inventory: up to " + items + " " + settings.currencyName(items)
+                        + " may be missing and were not refunded automatically.");
+            }
+            if (itemsTaken != UNKNOWN && !refundSkipped && returned < itemsTaken)
+            {
+                clause(fix, "Give back " + (itemsTaken - returned) + " "
+                        + settings.currencyName(itemsTaken - returned)
+                        + "; if a stack was reported as unconfirmed above, check the ground at the"
+                        + " player's position first.");
+            }
+            if (refundSkipped && blocksMutated && !poolRestored)
+            {
+                clause(fix, "The purchase stands: the items are the payment and the blocks were kept."
+                        + " If the player's file does not show bonus=" + updated
+                        + " after their next save, run /adjustbonusclaimblocks " + name + " " + blocks + ".");
+            }
+            // Whenever a grant was applied and undone, the disk may still be
+            // wrong: a save already in flight can have serialized the grant.
+            // Leaving this out is what would make the record a false all-clear.
+            if (blocksMutated && poolRestored)
+            {
+                clause(fix, "Verify the player's file: if it shows bonus=" + updated
+                        + ", a save that was already in flight serialized the abandoned total;"
+                        + " run /adjustbonusclaimblocks " + name + " -" + blocks + ".");
+            }
+            if (fix.length() == 0)
+            {
+                fix.append("nothing");
+            }
+            logger.log(Level.SEVERE, "Purchase failed for " + name + " (" + playerId + "): "
+                    + items + " " + settings.currencyName(items) + " requested, "
+                    + (itemsTaken == UNKNOWN ? "an unknown number" : String.valueOf(itemsTaken)) + " taken"
+                    + (recountFailed && itemsTaken != UNKNOWN ? " (by the removal's own count; the recount threw)" : "")
+                    + ", "
+                    + (refundSkipped ? "0 returned (the refund was deliberately skipped)" : returned + " returned")
+                    + "; claim blocks: " + blocksReport
+                    + "; durable write: " + writeReport
+                    + ". Fix by hand: " + fix, failure);
+        }
+        catch (Throwable ignored)
+        {
+            // java.util.logging allocates. Every step that changes state has
+            // already run, so a lost record strands nothing.
+        }
+
+        Error fatal = firstError(failure, undoFailure, refund.failure, persistFailure);
+        if (fatal != null)
+        {
+            throw fatal;
+        }
+        // Only a RuntimeException gets this far. Against 16.18.7 none is
+        // reachable in practice - the mutation can only throw Errors - but the
+        // outcome is defined anyway, so no future change leaves it undefined.
+        if (refundSkipped)
+        {
+            throw new IllegalStateException(
+                    "the purchase is in a state no configured message describes truthfully", failure);
+        }
+        return returned < itemsTaken
                 ? Result.fail("items-lost",
-                        "lost", items - returned, "item", settings.currencyName(items - returned))
+                        "lost", itemsTaken - returned, "item", settings.currencyName(itemsTaken - returned))
                 : Result.fail("transaction-failed");
     }
 
+    /**
+     * Trades claim blocks back for items.
+     *
+     * <p>Only the bonus pool is sellable. Accrued blocks are earned by playing,
+     * and letting those be cashed out would turn idle time into an infinite
+     * item faucet. The same check refuses the negative pools GriefPrevention's
+     * own /sellclaimblocks and /adjustbonusclaimblocks can create.
+     *
+     * <p>The availability figure is GriefPrevention's own
+     * getRemainingClaimBlocks(), not the bonus pool alone. It includes
+     * permission-group bonus blocks. Its overflow handling errs toward
+     * refusal both ways (javap, 16.18.7): an overflowing sum is clamped to
+     * Integer.MAX_VALUE before claim areas are subtracted, which can only
+     * understate what is free, and an overflowing subtraction returns 0,
+     * which reads here as blocks-in-use.
+     *
+     * <p>A deduction that cannot be undone is deliberately not made durable.
+     * Writing it would be the plugin choosing the player's loss; the operator
+     * record names the restore command instead.
+     */
     Result sell(Player player, int blocks)
     {
         if (!settings.sellingEnabled())
@@ -208,14 +587,16 @@ final class BarterService
         }
 
         UUID playerId = player.getUniqueId();
+        // Fetched once and never re-fetched, for the same reason as buy().
         PlayerData data = store.getPlayerData(playerId);
+        PlayerInventory inventory = player.getInventory();
 
-        int purchased = data.getBonusClaimBlocks();
+        // After the warm, claims is non-null, so getRemainingClaimBlocks()
+        // below runs no fix-negative pass and reads the same pool this does;
+        // the two numbers this method uses then describe one state.
+        int purchased = warmClaimData(data, player, "a sale");
         if (purchased < blocks)
         {
-            // Only the bonus pool is sellable. Accrued blocks are earned by
-            // playing, and letting those be cashed out would turn idle time
-            // into an infinite item faucet.
             return Result.fail("not-enough-blocks", "have", purchased);
         }
 
@@ -229,7 +610,8 @@ final class BarterService
         // like 0.29, which no double holds exactly, and 10000 / 100 * 0.29
         // evaluates to 28.999999999999996 - one item short once floored.
         // BigDecimal.valueOf reads the ratio back as the shortest decimal that
-        // round-trips, which is the value the operator typed.
+        // round-trips, which is the value the operator typed. Rounding down
+        // is the "the argument is what the player hands over" rule, not a loss.
         int items = BigDecimal.valueOf(blocks)
                 .multiply(BigDecimal.valueOf(settings.refundRatio()))
                 .divide(BigDecimal.valueOf(settings.blocksPerItem()), 0, RoundingMode.FLOOR)
@@ -239,15 +621,58 @@ final class BarterService
             return Result.fail("amount-too-small", "item", settings.currencyName());
         }
 
-        Throwable failure = null;
-        boolean deducted = false;
+        // As in buy(): everything the unwind can need, allocated while a
+        // failure still costs nothing. purchased >= blocks >= 1, so the
+        // subtraction cannot overflow.
+        Integer deductBox;
+        Integer restoreBox;
+        Handover payout;
+        String name;
         try
         {
-            data.setBonusClaimBlocks(purchased - blocks);
-            // As in buy(): the relative undo below is only correct if this
-            // autoboxing write actually landed.
-            deducted = true;
+            deductBox = Integer.valueOf(purchased - blocks);
+            restoreBox = Integer.valueOf(purchased);
+            payout = new Handover();
+            name = player.getName();
+            if (data.getBonusClaimBlocks() != purchased)
+            {
+                logger.warning(name + "'s bonus pool changed from " + purchased
+                        + " while preparing a sale; the sale was refused and nothing was charged");
+                return Result.fail("transaction-failed");
+            }
+        }
+        catch (Throwable prepFailure)
+        {
+            // As in buy(): by UUID, and a lost record strands nothing.
+            try
+            {
+                logger.log(Level.SEVERE, "Refused a sale for " + playerId
+                        + ": the transaction could not be prepared; nothing moved", prepFailure);
+            }
+            catch (Throwable ignored)
+            {
+                // See buy().
+            }
+            return Result.fail("transaction-failed");
+        }
+
+        boolean blocksMutated = false;
+        // As in buy(): true exactly when the try below completed, so nothing
+        // branches on it.
+        boolean saveStarted = false;
+        boolean poolRestored = false;
+        int liveAfter = UNKNOWN;
+        Throwable failure = null;
+        Throwable undoFailure = null;
+        Throwable persistFailure = null;
+
+        // Nothing has been handed over at this point, by construction.
+        try
+        {
+            data.setBonusClaimBlocks(deductBox);
+            blocksMutated = true;
             store.savePlayerData(playerId, data);
+            saveStarted = true;
         }
         catch (Throwable thrown)
         {
@@ -256,40 +681,185 @@ final class BarterService
 
         if (failure != null)
         {
-            if (deducted)
+            try
             {
-                // Adds this sale's own deduction back, rather than writing the
-                // snapshot, for the same reason as buy(). Applied without the
-                // flag, a failure in the setter itself would credit blocks that
-                // were never taken - free claim blocks out of a failed sale.
-                data.setBonusClaimBlocks(data.getBonusClaimBlocks() + blocks);
-                persistRollback(store, playerId, data, player);
+                if (!blocksMutated)
+                {
+                    poolRestored = true;
+                }
+                else
+                {
+                    int live = data.getBonusClaimBlocks();
+                    if (live == purchased - blocks)
+                    {
+                        // Measured untouched since the deduction, so the
+                        // pre-boxed value is this sale's own undo, written
+                        // without allocating.
+                        data.setBonusClaimBlocks(restoreBox);
+                        poolRestored = true;
+                    }
+                    else
+                    {
+                        // Adds back only this sale's own deduction, so a
+                        // foreign change made meanwhile survives.
+                        long relative = (long) live + blocks;
+                        if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE)
+                        {
+                            data.setBonusClaimBlocks(Integer.valueOf((int) relative));
+                            poolRestored = true;
+                        }
+                    }
+                }
             }
-            logger.log(Level.SEVERE, "Sale failed for " + player.getName()
-                    + "; gave back the " + blocks + " claim blocks deducted"
-                    + ", no items paid out", failure);
-            if (failure instanceof Error error)
+            catch (Throwable thrown)
             {
-                throw error;
+                undoFailure = thrown;
             }
+
+            // Skipped when the deduction stands: making an unpaid deduction
+            // durable is the plugin choosing the player's loss.
+            if (blocksMutated && poolRestored)
+            {
+                persistFailure = persistRollback(store, playerId, data);
+            }
+
+            try
+            {
+                liveAfter = data.getBonusClaimBlocks();
+            }
+            catch (Throwable ignored)
+            {
+                liveAfter = UNKNOWN;
+            }
+
+            suppress(failure, undoFailure);
+            suppress(failure, persistFailure);
+
+            // One record, composed last and from measured values only.
+            try
+            {
+                String writeReport = !blocksMutated
+                        ? "not attempted; nothing of this trade was ever written"
+                        : !poolRestored
+                                ? "skipped deliberately, so this plugin did not make the unpaid deduction durable"
+                                : persistFailure != null
+                                        ? "the synchronous write threw"
+                                        : "the synchronous write returned; GriefPrevention swallows write"
+                                                + " failures, so this does not confirm what the file holds";
+                StringBuilder fix = new StringBuilder();
+                if (blocksMutated && !poolRestored)
+                {
+                    clause(fix, "Give the blocks back: run /adjustbonusclaimblocks " + name + " " + blocks
+                            + ", or set the pool to " + purchased + " by hand. GriefPrevention may persist"
+                            + " the deduction on this player's next save before you act.");
+                }
+                // As in buy(): a save already in flight can have serialized
+                // the deduction, so the disk may still be wrong.
+                if (blocksMutated && poolRestored)
+                {
+                    clause(fix, "Verify the player's file: if it shows bonus=" + (purchased - blocks)
+                            + ", a save that was already in flight serialized the deducted total;"
+                            + " run /adjustbonusclaimblocks " + name + " " + blocks + ".");
+                }
+                if (fix.length() == 0)
+                {
+                    fix.append("nothing");
+                }
+                logger.log(Level.SEVERE, "Sale failed for " + name + " (" + playerId + "): "
+                        + (blocksMutated
+                                ? "deducted " + blocks + " claim blocks in memory, "
+                                        + (poolRestored ? "undone" : "NOT undone")
+                                : "the deduction was never applied")
+                        + ", pool now " + liveAfter + " (was " + purchased + "); no items were paid out"
+                        + "; durable write: " + writeReport
+                        + ". Fix by hand: " + fix, failure);
+            }
+            catch (Throwable ignored)
+            {
+                // As in buy(): every state step has already run.
+            }
+
+            Error fatal = firstError(failure, undoFailure, persistFailure, null);
+            if (fatal != null)
+            {
+                throw fatal;
+            }
+            if (!poolRestored)
+            {
+                throw new IllegalStateException(
+                        "the sale is in a state no configured message describes truthfully", failure);
+            }
+            // Truthful: nothing was handed over and the pool reads its
+            // pre-sale value.
             return Result.fail("transaction-failed");
         }
 
-        // The blocks are deducted and persisted by this point, so a payout that
-        // only partly lands cannot be reported as a completed sale. Saying
-        // "sold" while the items never arrived is the item-loss case
+        // The deduction is applied and its save thread started, so from here
+        // the server can no longer lose; only the payout can fall short.
+        try
+        {
+            liveAfter = data.getBonusClaimBlocks();
+            if (liveAfter != purchased - blocks)
+            {
+                logger.warning("After " + name + "'s sale the bonus pool reads " + liveAfter
+                        + " in memory but " + (purchased - blocks)
+                        + " was written; something outside ClaimBarter wrote it during the trade");
+            }
+        }
+        catch (Throwable ignored)
+        {
+            // Diagnostics only; the sale stands either way.
+        }
+        deliver(player, items, "payout for a sale", payout);
+        int paid = payout.delivered;
+
+        if (payout.failure instanceof Error error)
+        {
+            // The sale itself is correct - blocks gone, save started - and the
+            // JVM's problem is not this plugin's to swallow. If the payout fell
+            // short, deliver has already logged the exact counts.
+            throw error;
+        }
+        // Saying "sold" while the items never arrived is the item-loss case
         // SECURITY.md treats as a vulnerability rather than a bug.
-        int paid = deliver(player, items, "payout for a sale");
         if (paid < items)
         {
             return Result.fail("items-lost",
                     "lost", items - paid, "item", settings.currencyName(items - paid));
         }
-
+        // As in buy(): the reconciliation handle for a swallowed write.
+        try
+        {
+            logger.info(name + " sold " + blocks + " claim blocks for " + items + " "
+                    + settings.currencyName(items) + "; bonus pool " + purchased + " -> " + (purchased - blocks));
+        }
+        catch (Throwable ignored)
+        {
+            // Diagnostics only; the sale stands either way.
+        }
         return Result.ok("sold",
                 "blocks", blocks, "items", items, "item", settings.currencyName(items));
     }
 
+    /**
+     * Reports the exchange rate and the player's own pool.
+     *
+     * <p>Not side-effect-free, and it cannot be made so from here. Querying a
+     * player's claims makes GriefPrevention flush newly accrued blocks and
+     * may run its fix-negative pass, both in memory. That is GriefPrevention's
+     * own behaviour on any claims query - a shovel click does the same - and
+     * ClaimBarter does not persist it. The warm's WARNING is the record. buy()
+     * and sell() emit the same line through the same warm; this is merely the
+     * way to trigger it without trading.
+     *
+     * <p>The warm also makes the two numbers agree: the fix-negative pass, if
+     * any, runs before the pool is read, so getRemainingClaimBlocks() runs
+     * with claims already non-null and performs no further pool write.
+     *
+     * <p>Deliberately without a try/catch. Nothing ClaimBarter owns is live,
+     * so a throw belongs to the dispatcher, and a lookup must never be able to
+     * answer with a trade-failure message.
+     */
     Result info(Player player)
     {
         DataStore store = dataStore("a rate lookup", player);
@@ -299,29 +869,58 @@ final class BarterService
         }
 
         PlayerData data = store.getPlayerData(player.getUniqueId());
+        int purchased = warmClaimData(data, player, "a rate lookup");
+        int available = data.getRemainingClaimBlocks();
         return Result.ok("info",
                 "item", settings.currencyName(),
                 "blocks", settings.blocksPerItem(),
-                "purchased", data.getBonusClaimBlocks(),
-                "available", data.getRemainingClaimBlocks());
+                "purchased", purchased,
+                "available", available);
+    }
+
+    /**
+     * Forces GriefPrevention's lazy claim bookkeeping to run now, on this
+     * thread, and returns the bonus pool as it stands afterwards.
+     *
+     * <p>getClaims() is called for its side effect. Its first call per
+     * PlayerData runs the fix-negative pass, which credits bonusClaimBlocks,
+     * and leaves claims non-null so no save thread this trade starts can ever
+     * take that branch and write the pool behind the trade's back. The value
+     * returned is the post-fix one, so the trade is computed from, and undone
+     * to, a pool that already includes GriefPrevention's credit rather than
+     * one that would clobber it.
+     *
+     * <p>No try/catch: a throw here means nothing ClaimBarter owns has moved.
+     */
+    private int warmClaimData(PlayerData data, Player player, String operation)
+    {
+        int before = data.getBonusClaimBlocks();
+        data.getClaims();
+        int after = data.getBonusClaimBlocks();
+        if (after != before)
+        {
+            logger.warning("GriefPrevention corrected " + player.getName() + "'s bonus pool from " + before
+                    + " to " + after + " while preparing " + operation + "; ClaimBarter did not write this");
+        }
+        return after;
     }
 
     /**
      * GriefPrevention's data store, or null when it cannot be reached.
      *
-     * <p>Both {@code instance} and {@code dataStore} are public mutable fields
-     * that GriefPrevention clears as it unloads, so a dereference that was safe
-     * one statement ago can fail in the next. Resolving them before anything is
-     * taken from the player turns that into a refusal rather than a trade that
-     * has to be unwound.
+     * <p>Defence in depth, not an unload-race guard. GriefPrevention 16.18.7
+     * never stores null into {@code instance} or {@code dataStore}; what this
+     * does catch is a GriefPrevention whose onEnable threw before it assigned
+     * its data store, or a different build that behaves differently. Resolving
+     * both before anything is taken from the player turns that into a refusal
+     * rather than a trade that has to be unwound.
      *
-     * <p>It is a narrowing, not a guarantee, and the difference is worth being
-     * precise about. PlayerData loads lazily: getBonusClaimBlocks() calls
+     * <p>It is a narrowing, not a guarantee against a NullPointerException.
+     * PlayerData loads lazily: getBonusClaimBlocks() calls
      * loadDataFromSecondaryStorage(), which reads
-     * GriefPrevention.instance.dataStore again on its own. A player whose data
-     * is not cached yet can still fail there, after this check has passed. What
-     * the check does buy is that such a failure happens before any item or
-     * block has moved.
+     * GriefPrevention.instance.dataStore again on its own, after this check has
+     * passed. What the check does buy is that any such failure happens before
+     * any item or block has moved.
      */
     private DataStore dataStore(String operation, Player player)
     {
@@ -331,8 +930,8 @@ final class BarterService
         {
             // WARNING, not SEVERE. Nothing moved, and /claimbarter info needs
             // no permission and has no cooldown, so a player can repeat this
-            // at will during a GriefPrevention reload. At SEVERE it would bury
-            // the lines that report real item loss.
+            // at will for as long as the data store is unreachable. At SEVERE
+            // it would bury the lines that report real item loss.
             logger.warning("Refused " + operation + " for " + player.getName()
                     + ": GriefPrevention's data store is unavailable");
         }
@@ -340,127 +939,284 @@ final class BarterService
     }
 
     /**
-     * Writes a rollback to disk on the calling thread.
+     * Writes a rollback on the calling thread and hands back whatever that
+     * threw, or null.
      *
-     * <p>In the usual case there is nothing to correct: savePlayerData's whole
-     * body is {@code new SavePlayerDataThread(...).start()}, so if it threw,
-     * no thread was started and nothing of this trade ever reached the file.
-     * What this covers is the other case. GriefPrevention saves the same
-     * PlayerData from several places, and overrideSavePlayerData reads
+     * <p>On a purchase whose grant could not be undone, what it writes is the
+     * grant that stands rather than a correction, because the items were kept
+     * as its payment. The ordering argument below is the same either way.
+     *
+     * <p>In the usual case there is nothing on disk to correct:
+     * savePlayerData's whole body is {@code new SavePlayerDataThread(...).start()},
+     * so if it threw, no thread was started and nothing of this trade reached
+     * the file. What this covers is the other case. GriefPrevention saves the
+     * same PlayerData from several places, and overrideSavePlayerData reads
      * getBonusClaimBlocks() at serialization time, so an unrelated save that
-     * happened to serialize between the grant and the failure will have
+     * happened to serialize between the mutation and the failure will have
      * written the abandoned total. Then the file is wrong and only a write
      * fixes it.
      *
-     * <p>Synchronous, unlike the trade itself. Here the cost is paid only
-     * after something has already gone wrong, and the write completes before
-     * this returns rather than being handed to a thread that has to race the
-     * one that may have just corrupted the file. That is narrower than it
-     * sounds: an async writer already in flight can still truncate afterwards.
-     * What is guaranteed is ordering against anything that starts later.
+     * <p>Synchronous, unlike the trade itself, so the write is ordered against
+     * every writer that starts after it returns. It is not ordered against one
+     * already in flight, which can still truncate the file afterwards; that is
+     * why the caller's record always names the value to look for.
      *
-     * <p>Best effort. It can fail in turn - most obviously when the data store
-     * is the thing that went away - and it must not throw on top of the
-     * failure already being unwound, so it logs instead. The log does not name
-     * a number, because which value is on disk is exactly what is unknown here.
+     * <p>Throwable, not RuntimeException: the write itself is wrapped by
+     * GriefPrevention's own catch, so what realistically escapes is an Error.
+     * It is returned rather than thrown so the steps still owed after it run,
+     * and rather than logged so the caller's single record can report it with
+     * everything else. A null return means only that the call returned.
+     * GriefPrevention swallows write failures, so it does not mean the file
+     * was written.
      */
-    private void persistRollback(DataStore store, UUID playerId, PlayerData data, Player player)
+    private Throwable persistRollback(DataStore store, UUID playerId, PlayerData data)
     {
         try
         {
             store.savePlayerDataSync(playerId, data);
+            return null;
         }
-        catch (RuntimeException unrecoverable)
+        catch (Throwable thrown)
         {
-            logger.log(Level.SEVERE, "Rolled back " + player.getName()
-                    + " in memory but could not write it out; if another save had already"
-                    + " serialized the abandoned total, the file still holds it",
-                    unrecoverable);
+            return thrown;
         }
     }
 
     /**
      * Hands items to a player, dropping at their feet whatever will not fit,
-     * and returns how many actually arrived.
+     * and records in {@code out} how many actually arrived. Never throws.
      *
-     * <p>Dropping fires ItemSpawnEvent synchronously into other plugins'
-     * listeners, so this can fail partway through a large payout. It is caught
-     * here rather than allowed to escape: the caller is either unwinding a
-     * failed trade or has already persisted the blocks, and in both cases an
-     * escaping exception would replace the configured message with Bukkit's
-     * generic internal error and lose the record of what was owed.
+     * <p>Never throwing matters because both callers are past the point of no
+     * return: one is unwinding a failed purchase, the other has already
+     * deducted and saved the blocks. An escaping exception would replace the
+     * configured message with Bukkit's generic error and lose the record of
+     * what was owed.
      *
-     * <p>The count returned is what the caller reports. Reporting the amount
-     * requested instead would send an operator to restore items the player had
-     * already received, turning an item loss into item duplication.
+     * <p>The count is what the caller reports, so it is built from what was
+     * observed to land, never from what was requested. Reporting the amount
+     * requested would send an operator to restore items the player already
+     * had, turning an item loss into item duplication. The stack whose drop
+     * threw is counted as not received and called out separately, so the
+     * operator looks at the ground before restoring it.
      *
-     * <p>A dropped stack is only counted once the entity exists. World
+     * <p>What it closes. What entered the inventory is measured by recounting
+     * it rather than trusted from addItem's return map, so an addItem that
+     * throws after placing part of a stack is credited for exactly what it
+     * placed. A dropped stack counts only once the entity exists: World
      * .dropItemNaturally returns the Item whether or not ItemSpawnEvent was
-     * cancelled, so the return value carries no signal; an anti-lag or region
-     * plugin cancelling the spawn destroys the stack silently. isValid() is
-     * what distinguishes them.
+     * cancelled, so isValid() is what tells a cancelled spawn from a real one.
+     * A dropped stack is credited the smaller of what was handed over and what
+     * the valid entity holds afterwards, so a listener that shrinks it is
+     * caught and one that merges into it cannot inflate the count past what
+     * this trade handed over. World and location are re-read for every drop,
+     * because a listener is free to teleport the player. A player who
+     * disconnects stops the loop rather than having items pushed into an
+     * inventory they may never see.
+     *
+     * <p>What it does not capture: (a) whether addItem ever places outside the
+     * 36 storage slots - the API is silent and every relevant method is
+     * abstract, so this must be confirmed on a live server, and a miss would
+     * over-report loss; (b) whether isValid() is false for a never-added
+     * entity, which is paper-server behaviour absent from the API jar; (c) the
+     * true fate of the one unconfirmed stack; (d) a valid drop later
+     * despawning, burning, falling into the void, being cleared by an
+     * item-clear plugin or picked up by someone else - "delivered" means
+     * "entered the inventory or existed as a valid entity when read", not "is
+     * in the player's possession"; (e) a listener that adds or removes plain
+     * currency from the main inventory during the event, which skews the
+     * recount in whichever direction it moved, though the clamp keeps the
+     * reported loss non-negative and never above the amount; (f) under heap
+     * exhaustion the counts and the log line themselves allocate and may be
+     * lost.
      */
-    private int deliver(Player player, int amount, String context)
+    private void deliver(Player player, int amount, String context, Handover out)
     {
-        int maxStack = settings.currency().getMaxStackSize();
-        int delivered = 0;
-        boolean threw = false;
+        PlayerInventory inventory = null;
+        int before = UNKNOWN;
+        int placedTally = 0;
+        int dropped = 0;
+        int inFlight = 0;
+
+        // Counted first so a recount has something to diff against. A failure
+        // here only degrades the accounting, never the payout.
+        try
+        {
+            inventory = player.getInventory();
+            before = countCurrency(inventory);
+        }
+        catch (Throwable thrown)
+        {
+            out.failure = thrown;
+        }
+
         try
         {
             int remaining = amount;
             while (remaining > 0)
             {
-                int size = Math.min(remaining, maxStack);
-                remaining -= size;
-                Map<Integer, ItemStack> leftover =
-                        player.getInventory().addItem(new ItemStack(settings.currency(), size));
-                int notStored = 0;
-                for (ItemStack drop : leftover.values())
+                if (!player.isConnected())
                 {
-                    notStored += drop.getAmount();
+                    break;
                 }
-                // Whatever addItem did not hand back is in the inventory.
-                delivered += size - notStored;
+                int size = Math.min(remaining, settings.currency().getMaxStackSize());
+                // Cannot fail for validated settings: BarterSettings already
+                // rejects air and non-items, and size is at least 1.
+                ItemStack stack = new ItemStack(settings.currency(), size);
+                Map<Integer, ItemStack> leftover = inventory.addItem(stack);
+                remaining -= size;
+                // The leftover map's values are the argument stacks mutated in
+                // place, which is why size was read before the call.
+                int notStored = 0;
+                for (ItemStack rest : leftover.values())
+                {
+                    notStored += rest.getAmount();
+                }
+                placedTally += size - notStored;
                 for (ItemStack drop : leftover.values())
                 {
-                    // Re-read per drop: dropItemNaturally fires ItemSpawnEvent
-                    // synchronously, and a listener is free to teleport the
-                    // player, so a location cached before the loop can end up
-                    // in another region or another world entirely.
-                    Item dropped = player.getWorld()
-                            .dropItemNaturally(player.getLocation(), drop);
-                    if (dropped.isValid())
+                    int handedOver = drop.getAmount();
+                    if (handedOver <= 0)
                     {
-                        delivered += drop.getAmount();
+                        continue;
+                    }
+                    // Held until the call returns, so a drop that throws is
+                    // reported as unconfirmed rather than as delivered or lost.
+                    inFlight = handedOver;
+                    Item entity = player.getWorld().dropItemNaturally(player.getLocation(), drop);
+                    inFlight = 0;
+                    if (entity != null && entity.isValid())
+                    {
+                        ItemStack onGround = entity.getItemStack();
+                        dropped += Math.max(0,
+                                Math.min(handedOver, onGround == null ? 0 : onGround.getAmount()));
                     }
                 }
             }
         }
-        catch (Throwable failure)
+        catch (Throwable thrown)
         {
-            // Throwable, because both callers are unwinding a failure that may
-            // already be an Error. Logging here is the only record of what was
-            // owed, so it happens before the Error is passed on.
-            threw = true;
-            logger.log(Level.SEVERE, "Handing " + amount + " item(s) to " + player.getName()
-                    + " as a " + context + " stopped after " + delivered
-                    + "; the remaining " + (amount - delivered)
-                    + " are lost and must be restored by hand", failure);
-            if (failure instanceof Error error)
+            if (out.failure == null)
             {
-                throw error;
+                out.failure = thrown;
+            }
+            else
+            {
+                suppress(out.failure, thrown);
             }
         }
-        if (!threw && delivered < amount)
+
+        int placed = placedTally;
+        boolean exact = false;
+        if (before != UNKNOWN)
         {
-            // Nothing threw, so the shortfall is a drop that was cancelled
-            // rather than an exception. It leaves no other trace at all.
-            logger.severe("Only " + delivered + " of " + amount + " item(s) reached "
-                    + player.getName() + " as a " + context
-                    + "; the rest were destroyed before they landed, most likely by"
-                    + " another plugin cancelling ItemSpawnEvent");
+            try
+            {
+                placed = Math.max(0, Math.min(amount, countCurrency(inventory) - before));
+                exact = true;
+            }
+            catch (Throwable ignored)
+            {
+                // The tally from addItem's own return stands. It never exceeds
+                // the truth, so the reported loss is never under-stated.
+            }
         }
-        return delivered;
+
+        out.unconfirmed = inFlight;
+        out.delivered = (int) Math.min(amount, (long) placed + dropped);
+        int lost = (int) Math.max(0, (long) amount - out.delivered - out.unconfirmed);
+
+        if (out.delivered < amount)
+        {
+            try
+            {
+                logger.log(Level.SEVERE, "Handing " + amount + " " + settings.currencyName(amount)
+                        + " to " + player.getName() + " as a " + context + " fell short: "
+                        + out.delivered + " confirmed (" + placed + " into the inventory, "
+                        + dropped + " dropped at their feet), "
+                        + (out.unconfirmed > 0
+                                ? out.unconfirmed + " unconfirmed in a stack whose drop threw and may or may"
+                                        + " not be on the ground"
+                                : "0 unconfirmed")
+                        + ", " + lost + " lost and must be restored by hand. The inventory figure is "
+                        + (exact
+                                ? "exact, measured by recounting the inventory"
+                                : "counted from addItem's own return because the inventory could not be"
+                                        + " recounted, so this is a lower bound")
+                        + (out.failure == null
+                                ? "; nothing threw, so a drop was most likely destroyed by another plugin"
+                                        + " cancelling ItemSpawnEvent"
+                                : "")
+                        + (out.unconfirmed > 0
+                                ? "; check the ground at the player's position before restoring"
+                                : ""),
+                        out.failure);
+            }
+            catch (Throwable ignored)
+            {
+                // java.util.logging allocates; the counts in out still reach
+                // the caller.
+            }
+        }
+    }
+
+    /**
+     * Attaches a secondary failure to the one being reported.
+     *
+     * <p>Guarded because HotSpot can hand out the same preallocated
+     * OutOfMemoryError twice, and Throwable.addSuppressed throws on
+     * self-suppression; a failure here must not skip the steps after it.
+     */
+    private static void suppress(Throwable primary, Throwable secondary)
+    {
+        if (primary == null || secondary == null || secondary == primary)
+        {
+            return;
+        }
+        try
+        {
+            primary.addSuppressed(secondary);
+        }
+        catch (Throwable ignored)
+        {
+            // The secondary is lost from the record; nothing else depends on it.
+        }
+    }
+
+    /**
+     * The first java.lang.Error among the failures, in the order given.
+     *
+     * <p>Fixed arity rather than varargs, so choosing what to rethrow does not
+     * allocate an array on a path that may be running out of heap.
+     */
+    private static Error firstError(Throwable first, Throwable second, Throwable third, Throwable fourth)
+    {
+        if (first instanceof Error error)
+        {
+            return error;
+        }
+        if (second instanceof Error error)
+        {
+            return error;
+        }
+        if (third instanceof Error error)
+        {
+            return error;
+        }
+        if (fourth instanceof Error error)
+        {
+            return error;
+        }
+        return null;
+    }
+
+    /** Appends one fix-by-hand clause, space-joined to any before it. */
+    private static void clause(StringBuilder fix, String text)
+    {
+        if (fix.length() > 0)
+        {
+            fix.append(' ');
+        }
+        fix.append(text);
     }
 
     /**
@@ -494,7 +1250,13 @@ final class BarterService
                 && !stack.hasItemMeta();
     }
 
-    private void removeCurrency(PlayerInventory inventory, int amount)
+    /**
+     * Returns how many items the array it wrote back holds fewer than the one
+     * it read. That is exact once setStorageContents returns, and it is the
+     * fallback buy() uses when the recount after it cannot run. It can be less
+     * than amount if the inventory shrank since it was last counted.
+     */
+    private int removeCurrency(PlayerInventory inventory, int amount)
     {
         int remaining = amount;
         ItemStack[] contents = inventory.getStorageContents();
@@ -517,5 +1279,6 @@ final class BarterService
             }
         }
         inventory.setStorageContents(contents);
+        return amount - remaining;
     }
 }
