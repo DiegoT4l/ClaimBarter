@@ -4,3 +4,5 @@ target/
 *.class
 .mvn/wrapper/maven-wrapper.jar
 .atl/
+docs/design/purchase-rollback/harness/src/
+docs/design/purchase-rollback/harness/out/
