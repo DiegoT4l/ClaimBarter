@@ -6,6 +6,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -124,7 +126,15 @@ final class BarterService
             return Result.fail("blocks-in-use", "available", available);
         }
 
-        int items = (int) Math.floor(blocks / (double) settings.blocksPerItem() * settings.refundRatio());
+        // Decimal, not double: the ratio is written in config as a decimal
+        // like 0.29, which no double holds exactly, and 10000 / 100 * 0.29
+        // evaluates to 28.999999999999996 - one item short once floored.
+        // BigDecimal.valueOf reads the ratio back as the shortest decimal that
+        // round-trips, which is the value the operator typed.
+        int items = BigDecimal.valueOf(blocks)
+                .multiply(BigDecimal.valueOf(settings.refundRatio()))
+                .divide(BigDecimal.valueOf(settings.blocksPerItem()), 0, RoundingMode.FLOOR)
+                .intValueExact();
         if (items <= 0)
         {
             return Result.fail("amount-too-small", "item", settings.currencyName());
