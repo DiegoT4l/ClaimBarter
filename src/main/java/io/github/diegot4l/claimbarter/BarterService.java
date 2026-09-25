@@ -180,9 +180,10 @@ final class BarterService
      * skips the refund too: refunding a guess is either loss or duplication,
      * and the plugin cannot tell which.
      *
-     * <p>Errors are rethrown once every compensation step has run. The JVM's
-     * problem is not this plugin's to swallow, and the server's generic error
-     * the player then sees claims nothing about the trade.
+     * <p>An Error is not rethrown once every compensation step has run. The
+     * Bukkit dispatcher catches Throwable anyway, so rethrowing would only
+     * swap the measured outcome for the server's generic error and log the
+     * same stack twice; the SEVERE above already carries it.
      */
     Result buy(Player player, int items)
     {
@@ -530,14 +531,8 @@ final class BarterService
             // already run, so a lost record strands nothing.
         }
 
-        Error fatal = firstError(failure, undoFailure, refund.failure, persistFailure);
-        if (fatal != null)
-        {
-            throw fatal;
-        }
-        // Only a RuntimeException gets this far. Against 16.18.7 none is
-        // reachable in practice - the mutation can only throw Errors - but the
-        // outcome is defined anyway, so no future change leaves it undefined.
+        // Errors included: see the javadoc. Only an outcome no configured
+        // message can state truthfully still throws.
         if (refundSkipped)
         {
             throw new IllegalStateException(
@@ -779,11 +774,7 @@ final class BarterService
                 // As in buy(): every state step has already run.
             }
 
-            Error fatal = firstError(failure, undoFailure, persistFailure, null);
-            if (fatal != null)
-            {
-                throw fatal;
-            }
+            // As in buy(): the measured outcome, Errors included.
             if (!poolRestored)
             {
                 throw new IllegalStateException(
@@ -813,12 +804,20 @@ final class BarterService
         deliver(player, items, "payout for a sale", payout);
         int paid = payout.delivered;
 
-        if (payout.failure instanceof Error error)
+        // A shortfall is already logged by deliver with its throwable. A
+        // payout that arrived in full despite a failure is not, and an Error
+        // that is no longer rethrown must not vanish.
+        if (payout.failure != null && paid >= items)
         {
-            // The sale itself is correct - blocks gone, save started - and the
-            // JVM's problem is not this plugin's to swallow. If the payout fell
-            // short, deliver has already logged the exact counts.
-            throw error;
+            try
+            {
+                logger.log(Level.SEVERE, name + "'s sale paid out in full, but the payout raised this;"
+                        + " nothing needs fixing by hand", payout.failure);
+            }
+            catch (Throwable ignored)
+            {
+                // The sale stands either way.
+            }
         }
         // Saying "sold" while the items never arrived is the item-loss case
         // SECURITY.md treats as a vulnerability rather than a bug.
@@ -1180,33 +1179,6 @@ final class BarterService
         {
             // The secondary is lost from the record; nothing else depends on it.
         }
-    }
-
-    /**
-     * The first java.lang.Error among the failures, in the order given.
-     *
-     * <p>Fixed arity rather than varargs, so choosing what to rethrow does not
-     * allocate an array on a path that may be running out of heap.
-     */
-    private static Error firstError(Throwable first, Throwable second, Throwable third, Throwable fourth)
-    {
-        if (first instanceof Error error)
-        {
-            return error;
-        }
-        if (second instanceof Error error)
-        {
-            return error;
-        }
-        if (third instanceof Error error)
-        {
-            return error;
-        }
-        if (fourth instanceof Error error)
-        {
-            return error;
-        }
-        return null;
     }
 
     /** Appends one fix-by-hand clause, space-joined to any before it. */
