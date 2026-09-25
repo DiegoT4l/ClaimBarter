@@ -171,7 +171,8 @@ colour codes. `prefix` is prepended to all of them.
 | `blocks-in-use` | `{available}` |
 | `amount-too-small` | `{item}` |
 | `limit-reached` | `{limit}` |
-| `selling-disabled`, `invalid-amount`, `overflow`, `no-permission`, `players-only`, `usage`, `reloaded`, `transaction-failed` | none |
+| `items-lost` | `{lost}`, `{item}` |
+| `selling-disabled`, `invalid-amount`, `overflow`, `no-permission`, `players-only`, `usage`, `reloaded`, `transaction-failed`, `data-unavailable` | none |
 
 `saveDefaultConfig()` never overwrites an existing `config.yml`, so a server
 upgrading from an older release keeps its own `messages:` block. A key that is
@@ -238,6 +239,12 @@ The general rule is `blocks ≥ blocks-per-item ÷ refund-ratio`. Setting
 
 Items that do not fit are dropped at the player's feet rather than lost. The
 same applies to the refund path when a purchase fails halfway through.
+
+One caveat worth knowing if you run an anti-lag or region plugin: a drop that
+another plugin cancels destroys the stack, and nothing in the Bukkit API
+reports that back at the call site. ClaimBarter checks whether each dropped
+item actually exists, tells the player how many never arrived, and logs the
+shortfall for you to restore.
 
 </details>
 

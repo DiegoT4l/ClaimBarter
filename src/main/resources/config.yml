@@ -78,4 +78,18 @@ messages:
   players-only: "&cThis command has to be run by a player."
   usage: "&7Usage: &f/claimbarter buy <items> &7| &fsell <blocks> &7| &finfo"
   reloaded: "&aConfiguration reloaded."
-  transaction-failed: "&cThe trade failed and your items were returned. Tell an admin."
+  # Sent for a failed purchase and a failed sale alike, so the wording cannot
+  # promise items back: on a sale none were ever handed over.
+  transaction-failed: "&cThe trade failed and was rolled back. Nothing was charged. Tell an admin."
+
+  # Some of the items owed never reached the player: a refund after a failed
+  # purchase, or a payout for a sale that did go through. {lost} is how many,
+  # and {item} agrees with it. Worded to claim neither that the trade failed
+  # nor that the items are being "returned", because only one of those is true
+  # in each case.
+  items-lost: "&cSomething went wrong and &f{lost} {item}&c did not reach you. Tell an admin."
+
+  # GriefPrevention's claim data could not be reached, so nothing was even
+  # attempted. Distinct from transaction-failed because no trade was started,
+  # and /claimbarter info uses it too.
+  data-unavailable: "&cClaim data is unavailable right now. Try again in a moment."

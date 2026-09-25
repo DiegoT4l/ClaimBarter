@@ -1,0 +1,740 @@
+{
+  "summary": "Implement the judged transaction spec in BarterService, build a failure-injection harness, run it to green, then adversarially review until dry",
+  "agentCount": 16,
+  "logs": [
+    "Writer (opus) implements the spec while the harness builder (sonnet) builds stubs + injections",
+    "Writer: build_ok=true, 1236 lines, 9 deviations. Harness: compiles=true, baseline 12 pass / 42 fail, 0 skipped",
+    "Harness final: compiles=true, 54 pass / 0 fail after 0 fix rounds",
+    "Review round 1: 2 findings (1 blocking), harness adequacy=needs-fixes",
+    "Post-review harness: compiles=true, 72 pass / 0 fail",
+    "Review round 2: 5 findings (2 blocking), harness adequacy=needs-fixes"
+  ],
+  "result": {
+    "written": {
+      "build_ok": true,
+      "build_tail": "[INFO] \n[INFO] --- compiler:3.16.0:testCompile (default-testCompile) @ ClaimBarter ---\n[INFO] No sources to compile\n[INFO] \n[INFO] --- surefire:3.5.4:test (default-test) @ ClaimBarter ---\n[INFO] No tests to run.\n[INFO] \n[INFO] --- jar:3.5.0:jar (default-jar) @ ClaimBarter ---\n[INFO] Building jar: /home/diegot4l/Projects/ClaimBarter/target/ClaimBarter-1.0.2-SNAPSHOT.jar\n[INFO] ------------------------------------------------------------------------\n[INFO] BUILD SUCCESS\n[INFO] ------------------------------------------------------------------------\n[INFO] Total time:  1.139 s\n[INFO] Finished at: 2026-09-24T17:09:31-06:00\n[INFO] ------------------------------------------------------------------------",
+      "line_count": 1236,
+      "deviations": [
+        {
+          "step": "U2",
+          "what": "The spec requires a try/catch(Throwable) around the deliver call but does not say where the caught throwable goes. It is recorded into refund.failure, or attached to it with the guarded suppress helper if refund.failure is already set.",
+          "why": "The destination is unspecified. refund.failure is the slot U5 already attaches as suppressed and U7 already scans for an Error, so a throwable caught there reaches the summary and the rethrow without adding a new ledger variable."
+        },
+        {
+          "step": "delivery_accounting (1)",
+          "what": "deliver resolves `inventory = player.getInventory()` inside step (1)'s try, together with `before = countCurrency(inventory)`.",
+          "why": "The spec fixes the signature as deliver(player, amount, context, Handover) with no inventory parameter, but the algorithm uses `inventory`. Resolving it inside the guarded step keeps the never-throws contract. If it fails, `inventory` stays null, the loop's addItem throws a NullPointerException, and the loop's catch records it."
+        },
+        {
+          "step": "delivery_accounting (4)",
+          "what": "out.delivered = (int) Math.min(amount, (long) placed + dropped) and lost = (int) Math.max(0, (long) amount - delivered - unconfirmed) are computed in long.",
+          "why": "This gives the same values as the spec's min/max formulas without int overflow. placed + dropped can reach 2*amount when a listener interferes."
+        },
+        {
+          "step": "delivery_accounting (5)",
+          "what": "The spec lists what the SEVERE must name but not its wording. The wording comes from the harness_plan expected substrings and the failure_table phrases: 'N confirmed (P into the inventory, D dropped at their feet)', 'U unconfirmed in a stack whose drop threw and may or may not be on the ground' (just '0 unconfirmed' when zero, so it does not claim a drop threw), 'L lost and must be restored by hand', 'The inventory figure is exact, measured by recounting the inventory' or '...counted from addItem's own return because the inventory could not be recounted, so this is a lower bound', the ItemSpawnEvent clause when out.failure is null, and 'check the ground at the player's position before restoring' when unconfirmed > 0. out.failure is attached as the record's Throwable.",
+          "why": "The wording had to come from somewhere. The spec is silent on attaching the Throwable, but failure_table says the operator sees 'the listener's stack'. In sell's RuntimeException variant this record is the only place that stack is kept."
+        },
+        {
+          "step": "javadoc_claims_allowed (MANDATORY NON-GUARANTEES)",
+          "what": "The class javadoc says 'Both GriefPrevention backends catch around the write and only log - FlatFileDataStore catches Exception, DatabaseDataStore catches SQLException' instead of 'both backends catch Exception'.",
+          "why": "javap shows DatabaseDataStore.overrideSavePlayerData catches only java.sql.SQLException (exception table 0..219 -> 222, handler logs via AddLogEntry and returns). FlatFileDataStore catches Exception (13..108 -> 111). The substance, that write failures are invisible and savePlayerDataSync changes ordering but never observability, is unchanged."
+        },
+        {
+          "step": "U1/SU1 vs failure_table",
+          "what": "When the relative correction is out of int range, poolRestored stays false and undoFailure stays null. The failure_table row says 'poolRestored stays false, undoFailure recorded'.",
+          "why": "The step text is the implementation contract, and it records undoFailure only in the catch. Nothing is thrown on the out-of-range branch. The outcome does not change: the Error in failure is rethrown, or IllegalStateException is thrown in the RuntimeException variant."
+        },
+        {
+          "step": "U5/SU4, U7/SU6, U6a/SU5 FIX",
+          "what": "Structural helpers: suppress(primary, secondary) holds the guarded addSuppressed (its own try/catch(Throwable); skips null and self). firstError(a, b, c, d) picks the first Error with fixed arity (sell passes null as the fourth argument). clause(StringBuilder, String) space-joins the fix clauses.",
+          "why": "Readability only; behaviour matches the step text. Every addSuppressed still runs in its own try/catch. firstError is fixed-arity rather than varargs so choosing what to rethrow allocates no array under heap exhaustion."
+        },
+        {
+          "step": "javadoc_claims_allowed (class javadoc)",
+          "what": "Kept the existing sync-vs-async rationale paragraph but reworded 'used for rollbacks and only for rollbacks' to 'used only on the failure path, never on the trade itself'. Also removed 'nothing else is in flight to race' as ordered. The persistRollback javadoc now also says it persists a grant that stands in buy's U3.",
+          "why": "U3 calls persistRollback when a grant could not be undone, to persist that grant, so 'only for rollbacks' would be false. The paragraph gives design rationale and adds no guarantee beyond the allowed list."
+        },
+        {
+          "step": "B3",
+          "what": "The guard and the WARNING string are verbatim. The inline comment above the WARNING changed from 'repeat this at will during a GriefPrevention reload' to 'repeat this at will for as long as the data store is unreachable'.",
+          "why": "The old comment rested on the same unload-race premise the mandatory deletion removes from dataStore()'s javadoc: there is no null store to instance or dataStore in the 16.18.7 jar. Keeping it would contradict the new javadoc in the same method."
+        }
+      ],
+      "javadoc_deletions_done": [
+        "Class javadoc: removed 'nothing else is in flight to race'. The paragraph now reads '...it runs rarely, and leaving the correction in memory alone would leave the file holding whatever the last save serialized.'",
+        "dataStore() javadoc: removed 'GriefPrevention clears as it unloads' and the 'safe one statement ago can fail in the next' claim built on it. It now says 16.18.7 never stores null into instance or dataStore, that the guard is defence in depth against a GriefPrevention whose onEnable threw before assigning dataStore or a different build, and that it is a narrowing, not an NPE guarantee.",
+        "persistRollback() javadoc: removed 'it logs instead'. It now says the method catches Throwable and RETURNS it so later steps still run and the caller's single record reports it, and that a null return means only that the call returned, not that the file was written."
+      ],
+      "notes": "File: /home/diegot4l/Projects/ClaimBarter/src/main/java/io/github/diegot4l/claimbarter/BarterService.java (1236 lines, pure ASCII, Allman braces, LF). `git status --short` shows only this file modified. No git writes. config.yml and the other five Java files are untouched. The code returns only these existing keys: bought, sold, info, transaction-failed, items-lost, data-unavailable, not-enough-items, not-enough-blocks, blocks-in-use, selling-disabled, amount-too-small, limit-reached, invalid-amount, overflow. The clean verify compiled all 6 sources (release 21) with no warnings. This only proves the code compiles: CLAUDE.md requires a live Paper + GriefPrevention run, and residual_risks names four paper-server behaviours still to confirm.\n\nBYTECODE VERIFIED with javap (GP 16.18.7):\n- setBonusClaimBlocks(Integer) is aload_0/aload_1/putfield/return; getBonusClaimBlocks and the setter are unsynchronized; the bonusClaimBlocks field is a non-volatile Integer.\n- getClaims: claims putfield at offset 15 inside `ifnonnull 542`, bonusClaimBlocks putfield at 428 inside the same branch. The only other claims putfield is the constructor at offset 6.\n- No aconst_null store to GriefPrevention.instance or .dataStore: the stores are at offsets 1, 84, 99 and 239 and all store non-null values.\n- savePlayerData is just new SavePlayerDataThread + start. savePlayerDataSync calls getAccruedClaimBlocks, getClaims, then asyncSavePlayerData, which calls overrideSavePlayerData on the calling thread.\n- FlatFile overrideSavePlayerData is not synchronized and catches Exception 13..108 -> 111. DatabaseDataStore catches SQLException and logs.\n- getRemainingClaimBlocks uses addExact with group bonus blocks and maps overflow to MAX_VALUE or 0. The lazy load retries 5 times with Thread.sleep.\n- paper-api 26.2 has OfflinePlayer.isConnected, Item.getItemStack, Entity.isValid and World.dropItemNaturally(Location, ItemStack).\n\nIMPLEMENTED LITERALLY BUT WORTH TRIAGE:\n(a) B9: `failure = new IllegalStateException(...)` is unguarded, as the spec writes it. If that allocation throws OOM after items were taken, the Error leaves buy() with no refund and no ClaimBarter record. This needs itemsTaken != items on one thread plus heap exhaustion.\n(b) UNKNOWN = -1 is also a legitimate bonus pool value, so 'pool now -1' in a summary is ambiguous. Documented on the constant.\n(c) harness_plan invariant 'NO ALLOCATION-BEARING CALL BETWEEN THE TAKE AND THE GRANT (setStorageContents immediately followed by setBonusClaimBlocks)' conflicts with spec B9, which puts the measuring countCurrency/getStorageContents between them. The code follows the spec, so a harness asserting that invariant literally will fail even on BUY-HAPPY. That is a harness/spec conflict, not a code bug.\n(d) deliver adds the 'nothing threw, so a drop was most likely destroyed by another plugin cancelling ItemSpawnEvent' clause whenever out.failure is null, as specified. That includes a shortfall caused by the player disconnecting mid-payout, where the clause misattributes the cause.\n(e) S12 rethrows payout.failure when it is an Error even if the payout completed in full, for example when only the before-count OOMed. deliver logs only when short, so that path writes no SEVERE, no INFO, and shows the player the generic error for a completed sale. I adjusted the code comment so it does not repeat the spec's inaccurate 'deliver has already logged' parenthetical.\n(f) A RuntimeException recorded by deliver during a full delivery on sell is logged nowhere. deliver logs only when delivered < amount, and S12 rethrows only Errors.\n(g) saveStarted is written but never read in buy and sell. It is true exactly when the mutation try completed. I kept it because B8/S9 list it, with a comment explaining why nothing branches on it.\n(h) The `PlayerInventory inventory` local from S3 is unused in sell(), because deliver resolves its own inventory under the spec's signature.\n(i) Player.isConnected() is verified only in paper-api 26.2, the only paper-api in ~/.m2. CLAUDE.md claims Paper 1.21.x support too, so confirm it exists there.\n\nThe PREPARE locals (B7/S8) are declared before their try and assigned inside it, because they are used afterwards. The catch always returns, so they are definitely assigned. Behaviour is identical to the spec."
+    },
+    "harness": {
+      "harness_dir": "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness",
+      "run_command": "bash \"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/run.sh\"",
+      "compiles_against_committed": true,
+      "baseline": {
+        "passed": 12,
+        "failed": 42,
+        "sample_failures": [
+          "RESULT BUY-HAPPY mirror FAIL expected the INFO reconciliation line; entries= (committed code never logs an INFO reconciliation line on a successful buy)",
+          "RESULT BUY-REFUSE-OVERFLOW-NEGATIVE-POOL mirror FAIL expected a failing result, got Result[ok=true, messageKey=bought,...] (committed code has no `blocks > Integer.MAX_VALUE` guard before the pool-relative overflow check)",
+          "RESULT BUY-POOL-MOVED-BEFORE-MUTATION mirror FAIL expected a failing result, got Result[ok=true, messageKey=bought,...] (committed code has no PREPARE re-read, so a foreign write just before the mutation is silently overwritten instead of refused)",
+          "RESULT BUY-UNDO-OUT-OF-RANGE-GRANT-STANDS mirror FAIL the refund must be skipped: no addItem call expected (committed code always refunds unconditionally after granting, even when the relative undo would be out of int range)",
+          "RESULT SELL-UNDO-FAILS-DEDUCTION-STANDS mirror FAIL expected savePlayerDataSync to NEVER be called, got [savePlayerData(2147483647), savePlayerDataSync(-147483649)] (committed code persists an out-of-range relative correction instead of leaving the unpaid deduction un-persisted)",
+          "RESULT WARM-DISARMS-SAVE-THREAD mirror FAIL expected getClaims called at least twice, got 1 (committed code never forces getClaims() as a warm)",
+          "RESULT SELL-PAYOUT-ADDITEM-THROWS-AFTER-PARTIAL mirror FAIL expected deliver's partial-addItem SEVERE; entries=[...stopped after 0...] (committed deliver() credits a throwing addItem's return-map diff, i.e. 0, instead of re-counting the inventory - review #12 still open)",
+          "RESULT SELL-PAYOUT-LISTENER-SHRINKS-DROP mirror FAIL expected items-lost, got Result[ok=true, messageKey=sold,...] (committed deliver() credits the amount handed over, not the entity's actual on-ground amount)"
+        ]
+      },
+      "injections_implemented": [
+        "BUY-HAPPY",
+        "BUY-REFUSE-NO-ITEMS",
+        "BUY-REFUSE-OVERFLOW-NEGATIVE-POOL",
+        "BUY-SAVE-OOM-CLEAN-UNWIND",
+        "BUY-SAVE-OOM-STALE-WRITER-WINS",
+        "BUY-REMOVECURRENCY-THROWS-PARTWAY",
+        "BUY-TAKE-THROWS-AND-RECOUNT-THROWS",
+        "BUY-UNDO-OUT-OF-RANGE-GRANT-STANDS",
+        "BUY-POOL-MOVED-BEFORE-MUTATION",
+        "BUY-SILENT-WRITE-FAILURE",
+        "BUY-LAZY-LOAD-ZERO",
+        "BUY-DATASTORE-NULL",
+        "WARM-DISARMS-SAVE-THREAD",
+        "SELL-HAPPY",
+        "SELL-SAVE-OOM-CLEAN-UNWIND",
+        "SELL-UNDO-FAILS-DEDUCTION-STANDS",
+        "SELL-PAYOUT-ALL-DROPS-CANCELLED",
+        "SELL-PAYOUT-ADDITEM-THROWS-AFTER-PARTIAL",
+        "SELL-PAYOUT-LISTENER-SHRINKS-DROP",
+        "SELL-PAYOUT-LISTENER-MERGES-DROP-THEN-CANCEL",
+        "SELL-PAYOUT-LISTENER-TELEPORTS",
+        "SELL-PAYOUT-KICK-MID-PAYOUT",
+        "SELL-PAYOUT-DROP-THROWS-UNCONFIRMED",
+        "INFO-WARM-APPLIES-FIX",
+        "INFO-DATASTORE-NULL",
+        "METADATA-STACKS-NEVER-SPENT",
+        "NO-INVENTED-KEYS"
+      ],
+      "injections_skipped": [],
+      "knobs_unimplemented": [
+        "PlayerData.setterThrows: implemented only as a canary that fires if setBonusClaimBlocks is ever called with a null Integer. It cannot prove the deeper 'every argument was an Integer created before the first mutation' identity claim, because autoboxing happens in the CALLER's bytecode before the invokevirtual, so by the time any stub method receives the Integer argument, allocation has already succeeded or the call would never have arrived - there is no way for a plain object stub to observe whether that box was freshly allocated at the call site or reused from a PREPARE-time local without disassembling the compiled BarterService.class. Value-correctness and never-null are checked; true allocation-site identity is not.",
+        "PlayerInventory.addItemLeavesLeftover(n): named explicitly in harness_plan.json's PlayerInventory knob list but not implemented as its own knob. freeSlotOverride (hard cap on new slots) and throwInAddItemAfterPlacingK together cover every injection that needed a controlled leftover, but a direct 'always leave exactly n leftover regardless of slot occupancy' knob does not exist.",
+        "PlayerInventory.throwOnGetStorageContentsCallN: implemented literally (an absolute, 1-based call-index throw), but BUY-TAKE-THROWS-AND-RECOUNT-THROWS instead uses a more robust auxiliary knob, alsoFailNextReadAfterSetStorageContentsThrow, that arms the very next getStorageContents() call to fail regardless of its numeric index, since the exact call count before the recount is not fixed by the spec and would be fragile to hardcode.",
+        "Item.returnNullStack / World's corresponding null-stack-on-drop wiring: implemented and functional, but no injection among the 27 in harness_plan.json exercises it.",
+        "SELL-PAYOUT-DROP-THROWS-UNCONFIRMED: the plan asks for throwOnDropNumberN to be run once as a RuntimeException and once as an Error, which together with the mandatory mirror/copy split implies 4 total runs, but the harness's fixed two-runs-per-id output contract only allows 2. Both throwable variants ARE exercised (mirror=true drives the Error variant, mirror=false the RuntimeException variant), but not orthogonally against both inventory semantics.",
+        "info()'s 'can never return transaction-failed/items-lost/bought/sold under ANY knob combination' is checked only for the specific knob combination each INFO-* injection exercises, not swept across the full knob combinatorics.",
+        "BarterSettings.from(FileConfiguration): the FileConfiguration/ConfigurationSection stubs compile and their getString/getInt/getDouble/getBoolean/getConfigurationSection/getKeys behavior is implemented (getString's absent-vs-null collapsing was verified against paper-api 26.2's real MemorySection bytecode via javap), but the harness never calls BarterSettings.from(...) - BarterSettings is built directly through its record constructor per the task's own instruction, so config.yml's currency/selling/limits keys are never exercised through that path, only messages: is."
+      ],
+      "notes": "Two important discoveries shaped this run. (1) Bytecode verification via javap against /home/diegot4l/.m2/repository/com/github/GriefPrevention/GriefPrevention/16.18.7/GriefPrevention-16.18.7.jar confirmed every load-bearing claim the stubs rely on: PlayerData.setBonusClaimBlocks(Integer) is a bare aload_0/aload_1/putfield/return; PlayerData.getClaims() assigns claims=new Vector() at offset 15 BEFORE anything else runs, and applies the fix-negative credit to bonusClaimBlocks (offset 428, a bare putfield) exactly once, only inside the claims==null branch; DataStore.savePlayerData starts a SavePlayerDataThread whose run() calls getAccruedClaimBlocks() then getClaims() before asyncSavePlayerData, and DataStore.savePlayerDataSync calls getClaims() directly - both reproduced in the DataStore stub so WARM-DISARMS-SAVE-THREAD is meaningful. Against paper-api 26.2's MemorySection, getString(path,def) was confirmed to collapse both an absent key AND a present-but-null value to def - reproduced exactly in the ConfigurationSection stub. (2) Mid-task, git diff --stat HEAD -- src/main/java showed BarterService.java had been modified in the WORKING TREE (uncommitted) while this harness was being built - exactly the concurrent-writer scenario the task warned about. HEAD itself never moved (still 183ae00; docs/design/purchase-rollback/ and the five other named files are untouched - verified with git status --porcelain and git diff --stat at the end of the session). Because of this, the requested 'baseline against the committed sources' had to be produced from a separate compile of the git-show-HEAD snapshots (kept under harness/committed/ and harness/baseline-src/, verified byte-for-byte identical to git show HEAD:... right before the baseline run), NOT via run.sh, since run.sh's own contract is to always read the live working tree - which by the time of the final run already held what appears to be a substantially complete rewrite of BarterService.java implementing final_spec.json. Running run.sh against that in-progress rewrite currently reports 54/54 PASS; running the identical harness code against the true git-HEAD baseline reports 12/54 PASS, 42 FAIL, which is the healthy, discriminating result the task asked to confirm ('a harness that passes everything against the old code is a broken harness'). As an extra sanity check (not requested, done for confidence), one deliberate one-line mutation was applied to a throwaway copy of the current working-tree BarterService.java (removing the Math.min cap that keeps a merging ItemSpawnEvent listener from masking a later cancelled stack), and the harness caught it precisely: only SELL-PAYOUT-LISTENER-MERGES-DROP-THEN-CANCEL failed (52/54 passed), nothing else moved - evidence the 54/0 result against the current working tree is a real pass, not a blind spot. One interpretive decision worth flagging: harness_plan.json's invariant #6 ('setStorageContents immediately followed by setBonusClaimBlocks, with no getPlayerData/getClaims/lazy-load/ItemStack-construction/message-render in between') is in tension with final_spec.json's own B9 step, which mandates a countCurrency() recount (itself a getStorageContents() call) between the take and the grant. Read as strict adjacency this would be untestable against the spec's own protocol; the harness resolves it by treating getStorageContents() itself as permitted (it is not in the plan's own list of forbidden call kinds) while still flagging any getPlayerData/getClaims/internal-fix-negative/plugin-driven ItemStack construction in that window. A related fix was needed along the way: PlayerInventory's own copy-semantics defensive-copy cloning and other purely Bukkit-side plumbing (addItem's returned leftover object, an inventory slot's own new ItemStack, a dropped entity's synthetic stack) were initially logging as 'ItemStack construction' and tripping invariant #6 as a false positive on BUY-HAPPY under copy semantics; ItemStack now has a 3-arg internal constructor used by all such plumbing that still counts toward throwOnConstructAfterN but does not write to CallLog, so only allocations the PLUGIN's own code performs are visible to that invariant. All harness stub/driver Java files were checked and contain zero non-ASCII bytes, consistent with the ASCII-only rule even though it formally scopes to src/main/java, which this harness never touches. Nothing under docs/design/purchase-rollback/ or any of the six named files was written to by this session; every read of the four real sources for the harness's OWN build and baseline used git show HEAD:..., and the only touch of the repo's live working-tree copies is run.sh's own read-only cp. run.sh copies InvalidSettingException.java, BarterSettings.java, Messages.java and BarterService.java fresh from $CLAIMBARTER_REPO/src/main/java (defaulting to /home/diegot4l/Projects/ClaimBarter, overridable via the CLAIMBARTER_REPO env var) into harness/src, compiles them with every stub under harness/stubs and the driver under harness/driver via javac --release 21, and runs io.github.diegot4l.claimbarter.Harness against the repo's real src/main/resources/config.yml; it exits non-zero on any compile failure (set -euo pipefail, since javac itself returns non-zero) and on any injection failure (the driver calls System.exit(1) whenever TOTAL failed>0)."
+    },
+    "harnessFinal": {
+      "compiles": true,
+      "compile_error": "",
+      "passed": 72,
+      "failed": 0,
+      "total": 72,
+      "failures": [],
+      "raw_tail": "RESULT SELL-PAYOUT-KICK-MID-PAYOUT copy PASS\nRESULT SELL-PAYOUT-DROP-THROWS-UNCONFIRMED mirror PASS\nRESULT SELL-PAYOUT-DROP-THROWS-UNCONFIRMED copy PASS\nRESULT INFO-WARM-APPLIES-FIX mirror PASS\nRESULT INFO-WARM-APPLIES-FIX copy PASS\nRESULT INFO-DATASTORE-NULL mirror PASS\nRESULT INFO-DATASTORE-NULL copy PASS\nRESULT METADATA-STACKS-NEVER-SPENT mirror PASS\nRESULT METADATA-STACKS-NEVER-SPENT copy PASS\nRESULT NO-INVENTED-KEYS mirror PASS\nRESULT NO-INVENTED-KEYS copy PASS\nTOTAL passed=72 failed=0"
+    },
+    "fixLog": [],
+    "reviewLog": [
+      {
+        "round": 1,
+        "findings": [
+          {
+            "title": "A lone failure of the post-removal recount is treated identically to “removeCurrency itself may have failed”, discarding a fully-confirmed item count and aborting a purchase that removeCurrency actually completed",
+            "severity": "spec-deviation",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 289,
+            "scenario": "buy(player, 40) with 64 plain iron ingots in inventory and a healthy pool (bonus=500). removeCurrency(inventory, 40) runs to completion with NO exception (it physically removes exactly 40, leaving 24 — verified empirically, see below). Immediately after, the verification-only call `itemsTaken = beforeTake - countCurrency(inventory)` (line 291) throws (e.g. an Error surfaces while re-reading getStorageContents() under transient heap pressure — a call that happens strictly after removeCurrency returned, so it cannot itself be evidence that removeCurrency's own mutation was incomplete). The catch at lines 293-299 sets itemsTaken = UNKNOWN and failure = thrown regardless of whether removeCurrency threw. Because blocksMutated is then false (B10/B11 never runs) and itemsTaken == UNKNOWN, refundSkipped becomes true at line 403, so U2 never calls deliver() and the purchase throws IllegalStateException with ZERO items refunded and ZERO blocks granted. I reproduced this against the real working-tree class with the harness's own PlayerInventory stub (its `throwOnGetStorageContentsCallN` knob, which fails only the Nth getStorageContents() call and leaves setStorageContents/removeCurrency itself untouched): after the call, sumPlainCurrency(c) == 24 (i.e. removeCurrency genuinely took all 40, exactly as requested), c.data.setterArguments is empty (no grant attempted), and the SEVERE log reads '...an unknown number taken, 0 returned (the refund was deliberately skipped)... Fix by hand: Inspect the inventory: up to 40 iron ingots may be missing and were not refunded automatically.' The player is left having lost exactly 40 items for certain, received nothing for them, and the operator is handed a hedged 'up to 40 may be missing' instead of a precise 'give back 40' — even though the only source of uncertainty was a diagnostic re-read that runs strictly after the mutation, not the mutation itself. final_spec.json's B9 sub-case explicitly scopes this UNKNOWN/skip-refund treatment to 'removeCurrency threw AND the recount also threw'; the code applies it whenever the recount alone throws, which is a materially different (and here, empirically confirmed avoidable) precondition not covered by that numbered step or by the residual_risks list.",
+            "harness_gap": "None of BUY-TAKE-THROWS-AND-RECOUNT-THROWS or any other injection isolates a recount failure from a removeCurrency failure; the only recount-throws test (injBuyTakeThrowsAndRecountThrows) forces BOTH throwInSetStorageContentsAfterSlotK and alsoFailNextReadAfterSetStorageContentsThrow together, so it can only ever exercise the compound case. The stub already exposes `throwOnGetStorageContentsCallN`, which is exactly the tool needed for the isolated case (I used it: setup(mirror,500,100) + putCurrency(c,0,64) + `c.inv.throwOnGetStorageContentsCallN = 4` + buy(c.player, 40)) but no injection uses it that way. A missing assertion in that new injection should check that when removeCurrency itself produced no CallLog entry indicating a throw, the eventual state is NOT itemsTaken==UNKNOWN with a full skipped refund but instead a confident, measured itemsTaken.",
+            "fix_hint": "Don't let a failure of the verification read alone erase what is already known: if the removeCurrency try (lines 279-286) completed without recording a failure, the amount actually removed is bounded by `items` by removeCurrency's own loop invariant (remaining only decreases, starting at items) and, absent a foreign inventory writer (already treated as unreachable elsewhere in this file's own reasoning), is exactly `items`. Mirror the fallback pattern already used in deliver() for its own before-count failure (a degraded-but-non-UNKNOWN estimate) instead of collapsing straight to the UNKNOWN sentinel whenever ONLY the post-removal recount throws while removeCurrency itself signaled success.",
+            "lens": "PLAYER LOSS AND LIES"
+          },
+          {
+            "title": "deliver() is battle-tested against listener interference only via sell()'s payout call; buy()'s refund call to the same method has no equivalent regression coverage",
+            "severity": "cosmetic",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 410,
+            "scenario": "Every adverse-listener injection (cancelled ItemSpawnEvent, shrinking/merging drop, teleport, kick, drop-throws-unconfirmed, addItem-throws-after-partial) is wired up only against sell()'s deliver(...) call (SELL-PAYOUT-*). No BUY-side injection ever gives the refund path (line 410, `deliver(player, itemsTaken, \"refund for a failed purchase\", refund);`) a full-inventory or listener-interfering setup. I built and ran an equivalent scenario against the real class myself (buy(player,64) with 64 held, store.savePlayerData throwing OutOfMemoryError to force the unwind, c.inv.freeSlotOverride=0 to force the whole refund to the ground, and c.world.shrinkDropNumberTo.put(1,1) to shrink the dropped stack): the shared deliver() code handled it correctly — pool restored to 500, refund correctly measured as 1 of 64 delivered, both the 'Give back 63 iron ingots...' and the mandatory 'Verify the player's file... bonus=6900... /adjustbonusclaimblocks Steve -6400' clauses fired together as designed, and the original OutOfMemoryError was rethrown. So this is currently correct, not a live bug — but it is unprotected: any future change that alters how buy() constructs its Handover, computes itemsTaken, or wires the try/catch around its deliver() call (distinct code from sell()'s call site) could silently break the buy-side refund's accounting or its compositional fix-by-hand clauses without any of the 54 existing injections noticing, since none of them drive buy()'s refund through anything but a wide-open inventory.",
+            "harness_gap": "Add BUY-side mirrors of SELL-PAYOUT-LISTENER-SHRINKS-DROP / -MERGES-THEN-CANCEL / -TELEPORTS / -KICK-MID-PAYOUT / -DROP-THROWS-UNCONFIRMED / -ADDITEM-THROWS-AFTER-PARTIAL, each forcing a buy() unwind (e.g. via store.throwOnSavePlayerData) with c.inv.freeSlotOverride=0 and the matching World knob, asserting the same combination of Result key, measured returned/lost counts, and the compositional 'Give back N' + 'Verify the player's file' clauses that sell's suite already asserts for payout.",
+            "fix_hint": "Port the six SELL-PAYOUT-* injection bodies to BUY equivalents that trigger the refund via a save-time OutOfMemoryError (as I did above) instead of a successful deduction, reusing the same World/PlayerInventory knobs already in the stub.",
+            "lens": "PLAYER LOSS AND LIES"
+          }
+        ],
+        "adequacy": {
+          "missing_injections": [
+            "No injection ever produces `invalid-amount` (buy with items<=0 or sell with blocks<=0 is never called), even though this is one of the 14 keys the NO-INVENTED-KEYS injection claims to cover.",
+            "No injection ever produces `limit-reached`, even though `setup()`'s `maxPurchasedBlocks` parameter exists specifically to drive it (every call site that passes it explicitly passes 0 = disabled).",
+            "No injection ever produces `not-enough-blocks` (sell() with purchased < blocks) — sell()'s first refusal guard is never exercised.",
+            "No injection ever produces `blocks-in-use` (sell() with available=getRemainingClaimBlocks() < blocks) — this also means the design's own documented GriefPrevention behaviour ('maps arithmetic overflow to 0, which reads here as blocks-in-use') is never exercised despite PlayerData.remainingOverride existing precisely to model it (remainingOverride is set exactly once across the whole suite, in SELL-HAPPY, to a value equal to purchased).",
+            "No injection ever produces `amount-too-small` (sell() rounding down to 0 items) — the refundRatio/blocksPerItem combination that would trigger this is never constructed.",
+            "No injection ever produces `selling-disabled`, even though `setup()`'s `sellingEnabled` boolean exists specifically to drive it.",
+            "Net effect: 6 of the 14 valid message keys are never returned by any of the 27 injections, so a broken or missing config.yml template, a wrong placeholder, or a regressed guard clause for any of these six paths would pass the harness silently — the NO-INVENTED-KEYS check only validates keys actually observed (ALL_KEYS_SEEN), not the full declared VALID_KEYS set."
+          ],
+          "stub_infidelities": [
+            {
+              "stub": "me.ryanhamshire.GriefPrevention.DataStore.savePlayerData(UUID,PlayerData) and savePlayerDataSync(UUID,PlayerData)",
+              "real_behaviour": "Verified via javap of the real GriefPrevention-16.18.7.jar: savePlayerData's entire body is `new SavePlayerDataThread(this,id,data).start(); return;` — zero calls to PlayerData on the caller's thread. getAccruedClaimBlocks()/getClaims() only execute later, asynchronously, inside SavePlayerDataThread.run() on a different thread (confirmed by javap of the inner class). savePlayerDataSync does call getAccruedClaimBlocks() then getClaims() synchronously before asyncSavePlayerData, in that order.",
+              "stub_behaviour": "The stub's savePlayerData() AND savePlayerDataSync() both unconditionally call data.getClaims() then data.getBonusClaimBlocks() BEFORE checking throwOnSavePlayerData(Sync) and throwing. For savePlayerData in particular this contradicts the real ordering: the design's own javadoc says the realistic failure being modeled is 'Thread.start() cannot create a native thread' — an OOM thrown synchronously on the caller's thread strictly BEFORE the started thread's run() (and therefore before getClaims()/getAccruedClaimBlocks()) ever executes. The stub instead performs those PlayerData reads first and only then throws.",
+              "impact": "Currently harmless for every existing injection: by the time savePlayerData/-Sync is called, warmClaimData() has already forced getClaims() once, so claims is non-null and the stub's extra getClaims() call is a side-effect-free no-op (verified against the real bytecode: claims!=null short-circuits at offset 4). getBonusClaimBlocks() is a pure read with no mutation. So no currently-passing assertion is affected either way. The risk is forward-looking: a future injection that asserts 'zero PlayerData calls happen inside a failing savePlayerData()' (to prove the Thread.start()-before-run() ordering precisely) would be defeated by this stub, and the DataStore stub's own javadoc overstates fidelity ('this stub does the same, deterministically and on the calling thread, ... as the verified run() body does') when in the real jar that run() body executes on a separate thread whose exceptions could not even propagate back to BarterService's catch block the way this harness assumes."
+            }
+          ],
+          "vacuous_assertions": [
+            {
+              "where": "driver/Harness.java: checkSetterNeverThrew(Ctx) (called from every one of the 27 injections) is the sole implementation of harness_plan.json's invariant #5, 'PRE-BOXED SETTER'.",
+              "why_vacuous": "The plan states this invariant checks 'the setter call log must show that every argument was an Integer object created before the first mutation of that trade (identity comparison against the PREPARE boxes) or, on the relative-correction branch only, a fresh box created in a guarded step.' The implementation only asserts `!c.data.setterThrowsFired`, and PlayerData.setterThrows only fires when `setBonusClaimBlocks` is called with a literal null argument (stubs/me/ryanhamshire/GriefPrevention/PlayerData.java, setBonusClaimBlocks). It never compares the passed Integer's identity to grantBox/restoreBox/deductBox created during PREPARE, and `setterArguments` (which records every argument by reference) is used elsewhere ONLY to assert emptiness ('setter must never be called' in refusal-path tests) — never to check identity. So the invariant as declared ('no allocation happens in the rollback, proven by object identity') is not evaluated at all; only a much weaker, essentially unreachable 'never called with null' canary is.",
+              "fix": "In driver/Harness.java, capture the boxed references (grantBox/restoreBox in buy(), deductBox/restoreBox in sell()) is not possible from the harness side since they're private locals in BarterService — instead, change PlayerData.setBonusClaimBlocks to record `System.identityHashCode(value)` (or the reference itself) per call, and add a harness-side assertion for the OOM/undo injections that the restore call's Integer argument is `==` to some value already observed as a getter/getClaims return earlier in that trade (e.g., for BUY-SAVE-OOM-CLEAN-UNWIND: assert setterArguments.get(1) == an Integer boxing bonusBefore that was already read via getBonusClaimBlocks() before the grant, not merely equal to it). Concretely: I demonstrated this gap is live by editing BarterService.java's undo line from `data.setBonusClaimBlocks(restoreBox)` to `data.setBonusClaimBlocks(Integer.valueOf(bonusBefore))` (defeating the entire allocation-free-undo design goal that PlayerData.setBonusClaimBlocks's bare-putfield javadoc rationale exists to protect) and re-running run.sh: all 54 RESULT lines still PASS, TOTAL passed=54 failed=0."
+            }
+          ],
+          "verdict": "needs-fixes"
+        },
+        "triage": {
+          "decisions": [
+            {
+              "id": "FINDING-1: lone post-removal recount failure collapses to UNKNOWN and skips the refund",
+              "semantics": "buy(): removeCurrency returns normally, then the B9 verification recount (countCurrency -> getStorageContents) throws. itemsTaken becomes UNKNOWN, failure is the recount's throwable, no grant is made, the refund is skipped, the SEVERE says 'an unknown number taken, 0 returned (the refund was deliberately skipped) ... Inspect the inventory: up to N ... may be missing', and U7 rethrows.",
+              "verdict": "spec-gap",
+              "reasoning": "Rejected as a code finding: the code does exactly what the spec says, and the scenario is an accepted residual risk. final_spec.json step B9 prescribes the recount as its own `try { itemsTaken = beforeTake - countCurrency(inventory); } catch (Throwable thrown) { itemsTaken = UNKNOWN; if (failure == null) failure = thrown; }`. The `if (failure == null)` branch only does anything when removeCurrency did NOT throw. So the numbered step already covers the lone-recount case and says UNKNOWN for it. BarterService.java lines 289-300 copy it word for word, and line 403 is U2's `refundSkipped = (blocksMutated && !poolRestored) || itemsTaken == UNKNOWN` word for word. The failure_table row the finding quotes ('removeCurrency threw AND the recount also threw') describes the compound case. It never says 'only', and it does not narrow B9. The recount can throw only an Error from getStorageContents or its array allocation, i.e. heap exhaustion. residual_risks already accepts that: 'Under genuine heap exhaustion ... the refund, the recounts ... may all fail ... the operator record is best-effort'. I reproduced it in a scratch copy of the harness (throwOnGetStorageContentsCallN=4, which is the B9 recount: calls 1-3 are the B2 count, the PREPARE beforeTake and removeCurrency's read). Under both semantics 24 of 64 remain, setterArguments is empty and the SEVERE matches. One correction to the finding: the stub throws java.lang.Error, so U7 rethrows that Error, not IllegalStateException. The record is truthful: 'up to 40' covers exactly 40. The finding's fix, taking itemsTaken = items on a normal removeCurrency return, would trust instead of measure. That goes against B9 ('the measurement must survive...'), against the javadoc claim 'No number is reported ... that the plugin did not measure', and against the class javadoc at lines 168-171, so it is a spec change for a human to decide, not a code fix.",
+              "fix_instruction": "none"
+            },
+            {
+              "id": "BUY-RECOUNT-ALONE-THROWS",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "No injection separates a recount failure from a removeCurrency failure. BUY-TAKE-THROWS-AND-RECOUNT-THROWS always sets both throwInSetStorageContentsAfterSlotK and alsoFailNextReadAfterSetStorageContentsThrow. So the `if (failure == null) failure = thrown` branch of B9, the only branch that runs when removeCurrency completes, is never executed. A regression there would pass silently, for example refunding a guess, attaching the wrong throwable, or granting after an unmeasured take. The finding suggests asserting that the state is NOT UNKNOWN; that contradicts spec B9 and must not be adopted. The injection has to pin B9 as written.",
+              "fix_instruction": "stubs/org/bukkit/inventory/PlayerInventory.java: add `public boolean failNextReadAfterSetStorageContents = false;`. In setStorageContents, AFTER the existing `if (throwInSetStorageContentsAfterSlotK >= 0) { ... throw }` block, so it is reached only when the write completed, add `if (failNextReadAfterSetStorageContents) { failNextReadAfterSetStorageContents = false; nextGetStorageContentsThrows = true; }`. Reword the armed-read Error message in getStorageContents to a neutral 'harness: getStorageContents call #n throws (armed by a prior setStorageContents)'. driver/Harness.java: register run(\"BUY-RECOUNT-ALONE-THROWS\", Harness::injBuyRecountAloneThrows) right after BUY-TAKE-THROWS-AND-RECOUNT-THROWS. Body: setup(mirror, 500, 100); putCurrency(c, 0, 64); c.inv.failNextReadAfterSetStorageContents = true; call buy(c.player, 40) inside try/catch(Throwable). Assert: (a) thrown instanceof Error and its message contains 'getStorageContents'. (b) sumPlainCurrency(c) == 24 under BOTH semantics, because removeCurrency fully applied. (c) CallLog has exactly one 'PlayerInventory.setStorageContents' entry, and the next PlayerInventory entry after it is the failing getStorageContents. (d) No 'PlayerInventory.addItem' entry, and World.GLOBAL_DROP_LOG is empty. (e) c.data.setterArguments and c.store.saveCallLog are empty. (f) countAtLevel(c, SEVERE) == 1, and that SEVERE contains '40 iron ingots requested, an unknown number taken, 0 returned (the refund was deliberately skipped)', 'claim blocks: never granted', 'durable write: not attempted; nothing of this trade was ever written' and 'Fix by hand: Inspect the inventory: up to 40 iron ingots may be missing and were not refunded automatically.', and does NOT contain 'Give back'. (g) severe.thrown == thrown (same instance: failure is the recount's throwable) and severe.suppressed.length == 0. Then call checkSetterNeverThrew(c). Add a comment saying this pins final_spec B9 as written and must change only if the spec_gaps_for_human item on the lone-recount case is resolved differently."
+            },
+            {
+              "id": "PRE-BOXED SETTER (harness_plan invariant #5)",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "Confirmed vacuous. checkSetterNeverThrew only asserts !setterThrowsFired, and that fires only for a null argument. I replaced grantBox with Integer.valueOf((int) updated) and restoreBox with Integer.valueOf(bonusBefore) in a scratch repo copy (CLAIMBARTER_REPO override): the current harness still reports 54/54 PASS. The reviewer's fix will not work as written: getBonusClaimBlocks returns a primitive int, so the stub never sees an Integer from the plugin before the undo, and it has nothing to compare identity against. What does work, and I prototyped it: a per-thread allocation counter measured from the last stub read to the setter's entry. Against the working tree it reads 0 bytes on every setter call in all 27 injections x 2 semantics, and on in-range relative-branch calls it reads 16 bytes (a fresh box, which is permitted there). Against the mutant it reads 16 bytes on each mutated grant and restore call.",
+              "fix_instruction": "stubs/harness/support/CallLog.java: add `private static final com.sun.management.ThreadMXBean MX = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();` and `private static long allocMark;`. Add `public static void markAlloc() { allocMark = MX.getCurrentThreadAllocatedBytes(); }` and `public static long allocatedSinceMark() { return MX.getCurrentThreadAllocatedBytes() - allocMark; }`, both non-synchronized and allocation-free. Add a static initializer that calls both 1000 times, so linkage allocation never lands in a measured window. stubs/me/ryanhamshire/GriefPrevention/PlayerData.java: in getBonusClaimBlocks, replace `return bonusClaimBlocks.intValue();` with `int v = bonusClaimBlocks.intValue(); CallLog.markAlloc(); return v;`. The mark must come after the stub's own logging. Add `public final List<Long> setterAllocBytes = new ArrayList<>();`. Make the FIRST statement of setBonusClaimBlocks `long allocated = CallLog.allocatedSinceMark();` and append it to setterAllocBytes before any other stub work. stubs/org/bukkit/inventory/PlayerInventory.java: in getStorageContents, call CallLog.markAlloc() immediately before each `return` (in copy mode, after the copy array is built). This anchors the buy grant, whose preceding call is the B9 recount. driver/Harness.java: in main(), before any injection, check `MX.isThreadAllocatedMemorySupported() && MX.isThreadAllocatedMemoryEnabled()` and exit 1 if either is false, so the check cannot pass blind. Extend checkSetterNeverThrew(Ctx c, int... freshBoxAllowedIdx): keep the setterThrowsFired check, then for every i in c.data.setterAllocBytes not in freshBoxAllowedIdx, check(bytes == 0, \"invariant5 PRE-BOXED SETTER: setBonusClaimBlocks call #\" + i + \" (arg \" + c.data.setterArguments.get(i) + \") followed \" + bytes + \" bytes of allocation after the last pool/inventory read; its Integer was not boxed in PREPARE\"). All existing call sites stay no-arg, because none reaches the in-range relative branch. Comment that checked setter values must stay outside [-128,127], or Integer.valueOf returns a cached box and the check is blind (all current values already are). To cover the permitted half of the invariant, which no injection reaches today, add BUY-UNDO-RELATIVE-IN-RANGE and SELL-UNDO-RELATIVE-IN-RANGE. BUY: setup(mirror, 500, 100); putCurrency(c, 0, 64); throwOnSavePlayerData = new OutOfMemoryError(..); c.data.armForeignWriteAfterSetterCalls(1, 37); buy(player, 2). Expect the OOM rethrown, setterArguments [700, 537], checkSetterNeverThrew(c, 1), pool 537, currency 64, last sync save 'savePlayerDataSync(537)', and a SEVERE containing '2 taken, 2 returned', 'granted 200 and undone in memory, pool now 537' and 'Verify the player's file: if it shows bonus=700'. SELL: setup(mirror, 1000, 100, true, 1.0, 0); same OOM; arm(1, 37); sell(player, 500). Expect setterArguments [500, 1037], checkSetterNeverThrew(c, 1), pool 1037, and a SEVERE containing 'deducted 500 claim blocks in memory, undone, pool now 1037 (was 1000)' and 'Verify the player's file: if it shows bonus=500'. I checked all of these values with a probe. Acceptance: with grantBox/restoreBox/deductBox replaced by fresh Integer.valueOf(...) in a scratch copy, the harness must FAIL."
+            },
+            {
+              "id": "DataStore.savePlayerData stub ordering (stub infidelity)",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "I checked with javap on GriefPrevention-16.18.7.jar. savePlayerData is exactly `new SavePlayerDataThread(this,id,data); invokevirtual start(); return`. SavePlayerDataThread.run() (getAccruedClaimBlocks, getClaims, asyncSavePlayerData) runs on another thread, and its exceptions can never reach BarterService's catch. The only failure the caller sees is new/start throwing (OOM) before run() begins, so no PlayerData method is called on the caller's thread. The stub calls getClaims() and getBonusClaimBlocks() first and then throws. savePlayerDataSync, by contrast, runs getAccruedClaimBlocks, then getClaims, then asyncSavePlayerData, all on the calling thread, so reading before an in-write OOM is faithful there. I reordered the stub in a scratch copy and all 54 runs still pass: the pending foreign write from armForeignWriteAfterSetterCalls is then consumed by U1's own read instead of the stub's, and the end state is the same. The class javadoc also overstates fidelity.",
+              "fix_instruction": "stubs/me/ryanhamshire/GriefPrevention/DataStore.java, savePlayerData: move the throw check to the top, before any PlayerData call: `if (throwOnSavePlayerData != null) { saveCallLog.add(\"savePlayerData(threw before run)\"); CallLog.record(\"DataStore.savePlayerData(threw before run)\"); if (throwOnSavePlayerData instanceof Error error) { throw error; } throw (RuntimeException) throwOnSavePlayerData; }`. Keep the existing getClaims(), then getBonusClaimBlocks(), log and simulatedDisk write only on the non-throwing path, as the synchronous model of run() that WARM-DISARMS-SAVE-THREAD relies on. Leave savePlayerDataSync's ordering as is. Rewrite the class javadoc: the real savePlayerData only constructs and starts SavePlayerDataThread; run() executes getAccruedClaimBlocks/getClaims/asyncSavePlayerData on another thread whose exceptions never reach the caller; this stub runs that body synchronously on the success path as a deterministic model, and a configured throw models new/start failing before run() begins, so no PlayerData method is called. driver/Harness.java: in BUY-SAVE-OOM-CLEAN-UNWIND and SELL-SAVE-OOM-CLEAN-UNWIND, assert that the CallLog entry immediately before 'DataStore.savePlayerData(threw before run)' is the grant or deduction 'PlayerData.setBonusClaimBlocks(...)' (700 and 500 respectively), which proves no PlayerData call happens inside a failing savePlayerData."
+            },
+            {
+              "id": "BUY-REFUSE-INVALID-AMOUNT",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "No injection calls buy or sell with a non-positive amount, so 'invalid-amount' is never returned or rendered, and the B1/S1 rules ('Nothing read, nothing moved'; the selling check runs before the amount check) are never checked. A probe confirms: buy(p,0) returns invalid-amount with an empty CallLog apart from setup, and sell(p,0) with selling enabled returns invalid-amount with an empty CallLog.",
+              "fix_instruction": "driver/Harness.java: add and register BUY-REFUSE-INVALID-AMOUNT. setup(mirror, 500, 100); putCurrency(c, 0, 64); CallLog.reset() after putCurrency. For each of buy(c.player, 0), buy(c.player, -1) and, with a fresh setup(mirror, 1000, 100, true, 1.0, 0), sell(c.player, 0) and sell(c.player, -5): assert !result.ok(), key 'invalid-amount', placeholders.length == 0, and checkResultTruthfulKeyAndRender(result). Assert CallLog.snapshot() contains no 'PlayerInventory.getStorageContents', 'DataStore.getPlayerData' or 'PlayerData.' entry (B1/S1: nothing read), sumPlainCurrency(c) == 64, setterArguments and saveCallLog empty, and c.handler.entries empty. Then checkSetterNeverThrew(c)."
+            },
+            {
+              "id": "BUY-REFUSE-LIMIT-REACHED",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "Every setup call passes maxPurchasedBlocks = 0, so the B6 ceiling and 'limit-reached' with its {limit} placeholder are never exercised. Neither is the boundary (updated > limit, not >=). Probe: bonus 500, limit 600: buy(2) gives limit-reached [limit, 600]; buy(1) gives bought with the pool at 600.",
+              "fix_instruction": "driver/Harness.java: add and register BUY-REFUSE-LIMIT-REACHED. Case 1: setup(mirror, 500, 100, true, 0.5, 600); putCurrency(c, 0, 64); buy(c.player, 2). Assert key 'limit-reached', placeholderEquals(placeholders, \"limit\", 600), checkResultTruthfulKeyAndRender, and that the rendered text contains '600' and no '{'. Also assert currency still 64, setterArguments and saveCallLog empty, no 'PlayerInventory.setStorageContents' in CallLog, and nothing logged. Case 2 (boundary): a fresh setup with the same arguments; buy(c.player, 1) must return 'bought', live pool 600 and saveCallLog ['savePlayerData(600)'], which proves the comparison is strictly greater. Call checkSetterNeverThrew(c) in both cases."
+            },
+            {
+              "id": "SELL-REFUSE-NOT-ENOUGH-BLOCKS",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "S5, sell's first pool guard (purchased < blocks), is never reached. Neither is the negative-pool refusal the spec calls out. Probe: bonus 300, sell(500) gives not-enough-blocks [have, 300]; bonus -50, sell(1) gives [have, -50], with the warm run before the refusal.",
+              "fix_instruction": "driver/Harness.java: add and register SELL-REFUSE-NOT-ENOUGH-BLOCKS. Case 1: setup(mirror, 300, 100, true, 1.0, 0); sell(c.player, 500). Assert key 'not-enough-blocks', placeholderEquals(\"have\", 300), and checkResultTruthfulKeyAndRender (rendered contains '300'). Case 2: setup(mirror, -50, 100, true, 1.0, 0); sell(c.player, 1). Assert 'not-enough-blocks' with have == -50. In both cases assert CallLog shows 'PlayerData.getClaims#1' (S4 warm ran) and no 'PlayerData.getRemainingClaimBlocks' (S5 precedes S6); setterArguments and saveCallLog empty; no addItem and no drops; nothing logged; then checkSetterNeverThrew(c)."
+            },
+            {
+              "id": "SELL-REFUSE-BLOCKS-IN-USE",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "S6 is never exercised. remainingOverride is set once in the whole suite (SELL-HAPPY, equal to purchased), so neither the ordinary blocks-in-use refusal nor GriefPrevention's overflow-mapped-to-0 case that the design documents is tested. Probe: remainingOverride 200 gives blocks-in-use [available, 200]; remainingOverride 0 gives [available, 0]; getRemainingClaimBlocks is read after getClaims.",
+              "fix_instruction": "driver/Harness.java: add and register SELL-REFUSE-BLOCKS-IN-USE. Case 1: setup(mirror, 1000, 100, true, 1.0, 0); c.data.remainingOverride = 200; sell(c.player, 500). Assert key 'blocks-in-use', placeholderEquals(\"available\", 200), and checkResultTruthfulKeyAndRender (rendered contains '200'). Case 2: fresh setup, remainingOverride = 0 (GriefPrevention's mapped overflow); sell(500). Assert 'blocks-in-use' with available == 0. In both, assert that in the CallLog 'PlayerData.getClaims#1' comes before 'PlayerData.getRemainingClaimBlocks' (warm before availability, S4/S6); setterArguments and saveCallLog empty; no addItem and no drops; nothing logged; pool still 1000; then checkSetterNeverThrew(c)."
+            },
+            {
+              "id": "SELL-REFUSE-AMOUNT-TOO-SMALL",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "S7's round-down refusal is never built. Probe: bonus 1000, blocksPerItem 100, refundRatio 0.5, remainingOverride 1000: sell(199) gives amount-too-small [item, 'iron ingot'] (the uninflected currencyName()); sell(200) gives sold with 1 item.",
+              "fix_instruction": "driver/Harness.java: add and register SELL-REFUSE-AMOUNT-TOO-SMALL. Case 1: setup(mirror, 1000, 100, true, 0.5, 0); c.data.remainingOverride = 1000; sell(c.player, 199). Assert key 'amount-too-small', item placeholder equals c.settings.currencyName() ('iron ingot', uninflected, because the template supplies 'a single'), and checkResultTruthfulKeyAndRender (rendered contains 'a single iron ingot'). Also assert setterArguments and saveCallLog empty, no addItem and no drops, pool 1000, nothing logged. Case 2 (boundary): fresh setup with the same arguments; sell(c.player, 200) must return 'sold' with items == 1, pool 800 and one plain currency in the inventory. Call checkSetterNeverThrew(c) in both cases."
+            },
+            {
+              "id": "SELL-REFUSE-SELLING-DISABLED",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "setup's sellingEnabled is always true, so 'selling-disabled' and S1's order (disabled is checked before the amount and before the store) are never checked. Probe: selling disabled, sell(500) and sell(0) both give selling-disabled with an empty CallLog.",
+              "fix_instruction": "driver/Harness.java: add and register SELL-REFUSE-SELLING-DISABLED. setup(mirror, 1000, 100, false, 1.0, 0); CallLog.reset(); sell(c.player, 500). Assert key 'selling-disabled', no placeholders, checkResultTruthfulKeyAndRender, CallLog empty (no DataStore.getPlayerData and no PlayerData call), setterArguments and saveCallLog empty, nothing logged. Repeat with sell(c.player, 0) on a fresh setup and assert 'selling-disabled', not 'invalid-amount' (S1 order). Then checkSetterNeverThrew(c)."
+            },
+            {
+              "id": "NO-INVENTED-KEYS",
+              "semantics": "harness",
+              "verdict": "harness-bug",
+              "reasoning": "injNoInventedKeys checks only that the keys it observed are valid. It never requires the declared set to be covered, so 6 of the 14 keys (invalid-amount, limit-reached, not-enough-blocks, blocks-in-use, amount-too-small, selling-disabled) can lose their config.yml template or placeholders without failing anything. Today ALL_KEYS_SEEN holds only bought, sold, info, transaction-failed, items-lost, data-unavailable, not-enough-items and overflow.",
+              "fix_instruction": "driver/Harness.java, injNoInventedKeys (keep it registered LAST): after the existing loop, add `Set<String> missing = new HashSet<>(VALID_KEYS); missing.removeAll(ALL_KEYS_SEEN); check(missing.isEmpty(), \"NO-INVENTED-KEYS coverage: keys never produced by any injection: \" + missing);`. This passes only once the six refusal injections above are added and each routes its Result through checkResultTruthfulKeyAndRender. In checkResultTruthfulKeyAndRender, also check that the rendered text contains no '{' (an unsubstituted placeholder) in addition to 'Missing message'."
+            }
+          ],
+          "spec_gaps_for_human": [
+            "final_spec B9 vs failure_table: step B9's recount catch (`itemsTaken = UNKNOWN; if (failure == null) failure = thrown;`) prescribes an unknown count and a skipped refund even when removeCurrency returned normally and only the verification recount threw. The failure_table has a row only for the compound case, 'removeCurrency threw AND the recount also threw'. The code follows B9 word for word. Decide whether the lone-recount case should (a) keep UNKNOWN: a bounded, logged possible loss, as implemented now; or (b) trust removeCurrency's normal return as itemsTaken = items, stated as unmeasured in the SEVERE, and refund. Option (b) risks duplication only if a foreign inventory writer runs between PREPARE and the take, which the spec elsewhere calls unreachable on one thread, but it breaks the 'measured, never trusted' rule in B9 and the javadoc. Either way, add a failure_table row for this case. The new BUY-RECOUNT-ALONE-THROWS injection pins (a) until you decide.",
+            "harness_plan invariant #5 (PRE-BOXED SETTER) asks for an 'identity comparison against the PREPARE boxes'. A black-box harness cannot do that: PlayerData.getBonusClaimBlocks returns a primitive int, and no PREPARE-created Integer ever reaches a stub before the undo. The proposed harness fix swaps in a per-thread allocation counter (com.sun.management.ThreadMXBean.getCurrentThreadAllocatedBytes) that proves zero allocation between the last pool/inventory read and each pre-boxed setter call. This depends on a HotSpot management extension, and it only works for values outside the Integer cache range [-128,127]. Confirm this reinterpretation of the invariant is acceptable."
+          ]
+        },
+        "fix": {
+          "build_ok": true,
+          "files_changed": [
+            "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/harness/support/CallLog.java",
+            "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/me/ryanhamshire/GriefPrevention/PlayerData.java",
+            "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/me/ryanhamshire/GriefPrevention/DataStore.java",
+            "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/org/bukkit/inventory/PlayerInventory.java",
+            "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/driver/Harness.java"
+          ],
+          "summary": "I applied all 10 harness decisions. FINDING-1 had fix_instruction 'none', so I skipped it. I made no changes under /home/diegot4l/Projects/ClaimBarter. Its only modification is the BarterService.java change that was already in the working tree before I started (git status showed it 'M' at session start, although the task text said the tree was clean). I did not edit that file. I ran no git commands that write.\n\nBytecode check (javap on GriefPrevention-16.18.7.jar): DataStore.savePlayerData is exactly `new SavePlayerDataThread; invokespecial <init>; invokevirtual start; return`. SavePlayerDataThread.run() calls getAccruedClaimBlocks, then getClaims, then asyncSavePlayerData. savePlayerDataSync makes the same three calls on the calling thread. This matches the decision's reasoning.\n\nHarness changes:\n1. PlayerInventory stub. Added a `failNextReadAfterSetStorageContents` switch, armed only after a setStorageContents call completes. The armed-read Error message is now neutral. `CallLog.markAlloc()` runs right before each return of getStorageContents; in copy mode it runs after the copy is built.\n2. CallLog: added a per-thread allocation counter (com.sun.management.ThreadMXBean) through `markAlloc()` and `allocatedSinceMark()`. Both are non-synchronized, and a static initializer runs them 1000 times so linking never allocates inside a measured window.\n3. PlayerData stub. getBonusClaimBlocks marks the counter after its own logging. The first statement of setBonusClaimBlocks now reads `allocatedSinceMark()` into a new `setterAllocBytes` list.\n4. DataStore.savePlayerData: a configured throw now fires first and logs 'savePlayerData(threw before run)'. No PlayerData method is called on that path. The success path keeps getClaims and then getBonusClaimBlocks as a synchronous model of run(). savePlayerDataSync is unchanged. I rewrote the class javadoc to match the bytecode.\n5. Harness.java:\n   - main() exits 1 if per-thread allocation counting is unsupported or disabled.\n   - `checkSetterNeverThrew(Ctx, int... freshBoxAllowedIdx)` now requires 0 bytes of allocation before every setter call not listed as allowed. Its comment explains the blind spot for values in [-128,127].\n   - checkResultTruthfulKeyAndRender also rejects an unsubstituted '{'.\n   - BUY-SAVE-OOM-CLEAN-UNWIND and SELL-SAVE-OOM-CLEAN-UNWIND now assert that the entry just before the failing savePlayerData is setBonusClaimBlocks(700) and (500) respectively.\n   - NO-INVENTED-KEYS stays registered last and now also requires every one of the 14 declared keys to have been produced.\n   - New injections: BUY-RECOUNT-ALONE-THROWS (registered after BUY-TAKE-THROWS-AND-RECOUNT-THROWS; pins spec step B9 as written, with the required comment), BUY-UNDO-RELATIVE-IN-RANGE, SELL-UNDO-RELATIVE-IN-RANGE, BUY-REFUSE-INVALID-AMOUNT, BUY-REFUSE-LIMIT-REACHED (with the 600 boundary case), SELL-REFUSE-NOT-ENOUGH-BLOCKS (300 and -50), SELL-REFUSE-BLOCKS-IN-USE (200 and 0), SELL-REFUSE-AMOUNT-TOO-SMALL (199 refused; 200 sells 1 item) and SELL-REFUSE-SELLING-DISABLED (500 and 0). All assertions follow the decisions.\n   - One addition beyond the instructions: the two RELATIVE-IN-RANGE injections also check that setterAllocBytes[1] > 0. This is a positive control showing the counter does detect a fresh box.\n\nAcceptance, run in scratch repo copies through CLAIMBARTER_REPO; both copies are deleted:\n- grantBox, restoreBox and deductBox replaced with fresh Integer.valueOf(...): TOTAL passed=28 failed=44. Each failure names setter call #0, with 16 bytes allocated.\n- Only the restore calls changed to fresh boxes: passed=64 failed=8. Each failure names setter call #1.\n\nRequired checks on the real working tree:\n- `./mvnw -B clean verify`: BUILD SUCCESS, compiling 6 source files.\n- ASCII purity of src/main/java/io/github/diegot4l/claimbarter: no non-ASCII bytes.\n- Harness run: TOTAL passed=72 failed=0 (36 injections x 2 semantics).\n\nBoth spec_gaps_for_human items are still open for a human: the lone-recount case in B9, and the allocation-counter reading of invariant #5.",
+          "refused": []
+        }
+      },
+      {
+        "round": 2,
+        "findings": [
+          {
+            "title": "Recount-alone-throws after a clean take is treated as total unrefundable loss",
+            "severity": "hard-invariant",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 295,
+            "scenario": "Player holds >= N plain currency items. buy(player, N) runs: removeCurrency(inventory, N) (line 281) completes WITHOUT throwing, and by construction of removeCurrency's own loop (which only stops once `remaining` reaches 0, already validated held>=N moments earlier on the single Bukkit main thread) this deterministically means exactly N items left the inventory. Immediately after, the sole confirmatory read on line 291 (`itemsTaken = beforeTake - countCurrency(inventory)`) throws on its own (e.g. a transient allocation failure inside getStorageContents, unrelated to removeCurrency). The catch at line 293-299 sets itemsTaken = UNKNOWN and failure = thrown. Because itemsTaken == UNKNOWN, refundSkipped is forced true at line 403, so U2 never calls deliver() — none of the N items are refunded — and because blocksMutated is still false, no blocks are granted either. The Error is rethrown (line 513) so the player sees only the generic dispatcher error. The player has permanently lost all N items for literally nothing, while the operator SEVERE at line 496-502 reports 'an unknown number taken ... up to N ... may be missing and were not refunded automatically' — language that describes genuine uncertainty, when in fact the plugin already possesses a 100%-certain count (N) it chose not to use.",
+            "harness_gap": "Harness.java's injBuyRecountAloneThrows (BUY-RECOUNT-ALONE-THROWS, driver lines ~1414-1494) manufactures exactly this state — asserting `sumPlainCurrency(c) == 24` (i.e. all 40 of the requested items were actually removed) while only the next getStorageContents call throws — and then asserts today's lossy outcome (itemsTaken UNKNOWN, refund skipped, the 'may be missing' wording, addItem never called) as the expected PASS. Its own doc comment explicitly flags this as an unresolved 'spec_gaps_for_human' item, meaning the harness currently pins/characterizes the loss rather than catching it. No injection anywhere distinguishes 'removeCurrency itself threw' (genuine ambiguity, correctly UNKNOWN) from 'removeCurrency returned cleanly and only the follow-up confirmation read threw' (no real ambiguity, refund is safe).",
+            "fix_hint": "Give the take-throw and the recount-throw independent signals instead of folding both into one shared `failure`/`itemsTaken` pair. When removeCurrency (line 281) returns without throwing, itemsTaken is already known to equal `items`; only fall back to UNKNOWN when removeCurrency itself is the one that threw. If the recount throws after a clean removeCurrency, log a WARNING that confirmation failed but still refund the already-known `items` count rather than discarding a fact already in hand.",
+            "lens": "PLAYER LOSS AND LIES — read BarterService.java's actual buy()/sell()/deliver() control flow (not the spec prose) for any path where the player ends with fewer items+blocks than the truthful/achievable outcome, or a Result/log claims something the measured state doesn't support, or a count used to decide payout is wrong."
+          },
+          {
+            "title": "Double-precision price formula silently shorts the player by one item for ordinary non-power-of-two refund ratios",
+            "severity": "degraded",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 585,
+            "scenario": "With an entirely ordinary admin config such as `refund-ratio: 0.7`, `blocks-per-item: 1`, selling exactly 90 claim blocks computes `items = (int) Math.floor(blocks / (double) settings.blocksPerItem() * settings.refundRatio())` = floor(90 * 0.7). Because 0.7 has no exact binary floating-point representation, the double product evaluates to 62.999999999999993 rather than 63.0, so items comes out 62 instead of the mathematically exact 63 — verified numerically (Python Decimal/Fraction cross-check: mismatch reproduces at blocks=90,170,180,330,340,350,360,650,...,1460 for ratio 0.7, and similarly for e.g. 0.29, 0.9 at other block counts). The player is quietly paid one fewer item than the configured ratio promises, with no log line, no WARNING, and a plain 'sold' success message — deliver() truthfully places/drops exactly the `items` it was asked for, but the upstream price computation itself already shorted the player before delivery even started.",
+            "harness_gap": "Every sell-path injection in Harness.java sets refundRatio to either 1.0 (all the payout/listener-interference tests) or the untouched default 0.5 (the two purchase-ceiling tests at driver lines 1616/1636) — both exactly representable in binary — so no assertion anywhere compares the computed `items` against the mathematically exact decimal conversion for a fractional, non-power-of-two ratio (0.7, 0.9, 0.3, 0.6, ...), which is exactly the kind of value an operator is expected to configure; config.yml's own shipped default of 0.5 happens to dodge the very bug no test exercises.",
+            "fix_hint": "Compute the sale price with exact arithmetic instead of a double multiply-then-floor — e.g. represent refundRatio as a validated rational (numerator/denominator) at BarterSettings construction time and do `Math.floorDiv(blocks * numerator, blocksPerItem * denominator)`, or use BigDecimal with an explicit FLOOR rounding mode — so the result matches the configured ratio exactly instead of depending on binary floating-point representability.",
+            "lens": "PLAYER LOSS AND LIES — read BarterService.java's actual buy()/sell()/deliver() control flow (not the spec prose) for any path where the player ends with fewer items+blocks than the truthful/achievable outcome, or a Result/log claims something the measured state doesn't support, or a count used to decide payout is wrong."
+          },
+          {
+            "title": "sell() javadoc overstates getRemainingClaimBlocks() overflow direction as always safe",
+            "severity": "degraded",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 539,
+            "scenario": "An operator (or GriefPrevention itself, whose own /adjustbonusclaimblocks has no upper bound) sets a player's bonus pool to a value close to Integer.MAX_VALUE, and the player also has non-trivial accrued and/or permission-group bonus blocks, such that accrued+bonus+groupBonus overflows int range inside PlayerData.getRemainingClaimBlocks(). javap of PlayerData.class shows two separate try/catch(ArithmeticException) ranges in that method: the SUM stage (accrued+bonus, then +groupBonus, both via Math.addExact) is caught and clamped to Integer.MAX_VALUE, after which the claim-area subtraction loop runs from that ceiling and returns a large positive number close to Integer.MAX_VALUE, not 0; only a SECOND overflow, inside the claim-area subtractExact loop itself, returns 0. Because sell()'s S6 guard is `if (available < blocks) return fail(\"blocks-in-use\")` (line 577-581), a sum-stage overflow makes `available` enormous, so the guard never fires for any realistic `blocks` argument -- exactly the opposite of the class's own claim at line 539 that overflow 'reads here as blocks-in-use - the safe direction.' The sale then proceeds even though it should have been refused as committed-to-claims. Note the spec's own residual_risks entry #9 already hedges correctly ('maps arithmetic overflow to Integer.MAX_VALUE or 0 internally'), but the numbered step S6 in final_spec.json drops that nuance to a bare 'maps arithmetic overflow to 0', and BarterService.java's sell() javadoc reproduces that narrower, bytecode-contradicted version verbatim.",
+            "harness_gap": "The harness's PlayerData stub only exposes getRemainingClaimBlocks() via a hand-set `remainingOverride` field (stubs/me/ryanhamshire/GriefPrevention/PlayerData.java); it never models GriefPrevention's real addExact/subtractExact overflow arithmetic, so no injection drives the actual sum-overflow-vs-subtraction-overflow branches, and no assertion compares the shipped javadoc's overflow claim against the decompiled jar. A SELL-BLOCKS-IN-USE-SUM-OVERFLOW scenario setting remainingOverride to a value derived from the verified addExact-then-clamp-to-MAX_VALUE behavior (rather than 0) would have caught the mismatch.",
+            "fix_hint": "Either correct the comment to state the asymmetric truth verified via javap -- sum-stage overflow clamps toward Integer.MAX_VALUE (favoring the sale, not refusal), and only the claim-area subtraction stage can yield 0 -- or drop the specific-value claim entirely and say GriefPrevention's own overflow behavior here is unspecified/not relied upon for safety, matching the more careful wording already used in the design's own residual-risk notes.",
+            "lens": "OPERATOR TRUTH: verified every SEVERE/WARNING/INFO in BarterService.java is composed only from measured ledger values, never falsely claims a durable write, never says undone/restored/given-back when the corresponding flag is false, includes every applicable compositional fix clause with the exact /adjustbonusclaimblocks command whenever a pool mutation applied, contains no hardcoded player-facing text, cannot let info() return a trade key, and cross-checked every javadoc sentence (class-level and per-method) against final_spec.json's javadoc_claims_allowed/MANDATORY DELETIONS list and against javap output for GriefPrevention-16.18.7.jar (PlayerData, DataStore, FlatFileDataStore, DatabaseDataStore, GriefPrevention classes)."
+          },
+          {
+            "title": "info() javadoc overclaims exclusivity of the fix-negative WARNING",
+            "severity": "cosmetic",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 811,
+            "scenario": "warmClaimData() (lines 854-865) is the single helper called identically from buy() (line 212), sell() (line 571) and info() (line 831), and it emits the exact same WARNING ('GriefPrevention corrected <player>'s bonus pool from X to Y while preparing <operation>...') regardless of which of the three called it. The first time a player ever runs /claimbarter buy or /claimbarter sell (not info), if GriefPrevention's fix-negative pass fires, that same WARNING appears from the trade itself. An operator who takes the info()-method javadoc literally -- 'the only place in the plugin where GriefPrevention's own credit to the pool is visible' -- could wrongly assume this correction is only ever surfaced via a manual, side-effect-free /claimbarter info lookup, and fail to recognize the identical line when it is emitted mid-trade from buy() or sell() instead.",
+            "harness_gap": "Harness.java only exercises this WARNING under INFO-WARM-APPLIES-FIX; there is no assertion that the same warning text/format is reachable (and identical) from BUY and SELL paths too, so nothing in the suite checks the info()-javadoc's exclusivity claim against the other two call sites that share the same helper.",
+            "fix_hint": "Reword to something like 'a read-only lookup is the cheapest, trade-free way to trigger and observe this correction, since buy() and sell() emit the identical WARNING through the same warm whenever their own trade happens to trigger it' instead of asserting info() is the only place it can ever appear.",
+            "lens": "OPERATOR TRUTH: verified every SEVERE/WARNING/INFO in BarterService.java is composed only from measured ledger values, never falsely claims a durable write, never says undone/restored/given-back when the corresponding flag is false, includes every applicable compositional fix clause with the exact /adjustbonusclaimblocks command whenever a pool mutation applied, contains no hardcoded player-facing text, cannot let info() return a trade key, and cross-checked every javadoc sentence (class-level and per-method) against final_spec.json's javadoc_claims_allowed/MANDATORY DELETIONS list and against javap output for GriefPrevention-16.18.7.jar (PlayerData, DataStore, FlatFileDataStore, DatabaseDataStore, GriefPrevention classes)."
+          },
+          {
+            "title": "sell() javadoc (mirroring spec S6) overclaims GriefPrevention always maps overflow in getRemainingClaimBlocks() to 0",
+            "severity": "spec-deviation",
+            "file": "src/main/java/io/github/diegot4l/claimbarter/BarterService.java",
+            "line": 539,
+            "scenario": "final_spec.json S6 requires: \"Javadoc must state this is GriefPrevention's own figure: it includes permission-group bonus blocks and maps arithmetic overflow to 0 (which reads here as blocks-in-use, the safe direction).\" The code (line 537-540) reproduces this: \"...it maps arithmetic overflow to 0, which reads here as blocks-in-use - the safe direction.\" javap of PlayerData.getRemainingClaimBlocks() (GriefPrevention-16.18.7.jar) shows TWO distinct try/catch(ArithmeticException) ranges, not one: (1) offsets 0-28 wrap `Math.addExact(accrued, bonus, groupBonus)`; on overflow, the handler at offset 31 does `ldc 2147483647; istore_1` -- clamps to Integer.MAX_VALUE, not 0. (2) offsets 35-75 wrap the per-claim `Math.subtractExact(remaining, claim.getArea())` loop; only THIS overflow is caught at offset 78 and returns `iconst_0`. Concretely: a player whose accrued + bonus + permission-group-bonus sum overflows int range (reachable in a real deployment if `maxPurchasedBlocks` is left at 0/unlimited, since B6's ceiling check is then a no-op and the bonus pool can approach Integer.MAX_VALUE through repeated buys or /adjustbonusclaimblocks) gets `available == Integer.MAX_VALUE` back from S6's `int available = data.getRemainingClaimBlocks();`. The check at line 578 `if (available < blocks) return fail(\"blocks-in-use\", ...)` can then never fire, so a sale of blocks GriefPrevention itself considers committed to claims is silently permitted -- the opposite of the \"safe direction\" the javadoc promises. Note the spec's own `residual_risks` section already hedges this correctly (\"maps arithmetic overflow to Integer.MAX_VALUE or 0 internally\"), so this is an internal inconsistency between final_spec.json's S6 instruction and its own residual_risks entry, which the code faithfully inherited without reconciling.",
+            "harness_gap": "There is no src/test (per CLAUDE.md, none is expected), and nothing in the build cross-checks a javadoc's factual claim about GriefPrevention's bytecode against a javap disassembly of the two distinct overflow branches in PlayerData.getRemainingClaimBlocks(). A harness for this class of finding would javap-diff every bytecode-grounded javadoc sentence against the actual jar, or at minimum construct a PlayerData with accrued+bonus+groupBonus summing past Integer.MAX_VALUE and assert what getRemainingClaimBlocks() returns before trusting the 'safe direction' claim.",
+            "fix_hint": "Correct the sell() javadoc to state both branches honestly: the accrued+bonus+group-bonus addition overflow clamps to Integer.MAX_VALUE (the unsafe direction -- blocks-in-use cannot fire), while only the per-claim-area subtraction overflow clamps to 0 (the safe direction). If the blocks-in-use refusal must hold even under the addition-overflow path, treat `available == Integer.MAX_VALUE` as suspicious before comparing it to `blocks`, or document the residual risk explicitly rather than asserting a blanket 'safe direction'. The upstream final_spec.json S6 instruction should also be reconciled with its own residual_risks entry so future implementations don't inherit the same overclaim.",
+            "lens": "spec-conformance audit: BarterService.java (working tree) vs docs/design/purchase-rollback/final_spec.json, step-by-step (B1-B12, U1-U7, S1-S12, SU1-SU6, I1-I7, delivery_accounting, message_keys, javadoc_claims_allowed incl. MANDATORY DELETIONS/NON-GUARANTEES), cross-verified via javap against GriefPrevention-16.18.7.jar bytecode; plus git-status/ASCII/Allman-brace/build checks"
+          }
+        ],
+        "adequacy": {
+          "missing_injections": [
+            "CRITICAL: getNameThrows (Player) is built and explicitly earmarked in harness_plan.json (\"for the PREPARE row\") but no injection in Harness.java ever sets it. This hides a real, reproducible spec violation: in both BarterService.buy() and sell(), the PREPARE try/catch's catch block rebuilds the SEVERE message with a second, unguarded call to player.getName(); if getName() throws persistently (realistic under the same OOM conditions final_spec.json already worries about, since building that message also allocates), the catch handler itself throws and the method propagates an uncaught java.lang.Error instead of logging the SEVERE and returning Result.fail(\"transaction-failed\") that final_spec.json's failure_table row 'B7/S8 PREPARE' requires (operator_sees: 'SEVERE naming the player... nothing moved'). I reproduced this directly with a standalone probe against the harness's own stubs: buy(player,2) with player.getNameThrows=true throws java.lang.Error uncaught with zero log entries recorded, and BarterCommand.java has no try/catch around the buy()/sell() calls to soften this. The 72/72-green harness run gives no signal this exists, even though the exact knob needed to catch it was already built into the Player stub.",
+            "throwOnGetStorageContentsCallN (PlayerInventory), described in harness_plan.json as existing 'to make a countCurrency call fail,' is never referenced by any injection (grep count 0). The very first countCurrency(inventory) read at the top of buy() (the 'held < items' check) and the analogous early reads elsewhere are never exercised failing.",
+            "returnNullOnDropNumbers (World) and nullStackOnDropNumbers/returnNullStack (Item) are defined in the plan and the stubs but never armed by any injection (grep count 0 each), even though BarterService.deliver() contains defensive checks written for exactly these cases ('entity != null && entity.isValid()' and 'onGround == null ? 0 : onGround.getAmount()'). A regression deleting either null-check (causing an NPE mid-payout) would pass all 72 runs undetected.",
+            "lazyLoadThrowsRuntime / lazyLoadThrowsError (PlayerData) are defined but never armed by any injection. warmClaimData()'s first data.getBonusClaimBlocks() call (which triggers the lazy load) is unguarded (no try/catch) in both buy() and sell(); the scenario where that lazy load throws is never exercised, so there is no evidence the resulting uncaught propagation is actually what happens or is acceptable.",
+            "throwOnGetClaimsError / throwOnGetClaimsRuntime (PlayerData) are defined but never armed. warmClaimData()'s data.getClaims() call is likewise unguarded; a throwing getClaims() during the warm (central to the whole WARM-DISARMS-SAVE-THREAD design) is never exercised failing.",
+            "throwOnGetRemainingError / throwOnGetRemainingRuntime (PlayerData) are defined but never armed. sell()'s unguarded data.getRemainingClaimBlocks() call (used for the blocks-in-use check, before the PREPARE try/catch even starts) throwing is never exercised.",
+            "throwOnConstructAfterN / throwOnSetAmountAfterN (ItemStack) are defined in the plan explicitly 'to exercise the deliver allocation-failure row' but neither is ever set by any injection (grep count 0 each). Genuine-heap-exhaustion failure inside deliver()'s per-chunk 'new ItemStack(...)' or inside removeCurrency's 'stack.setAmount(...)' is never exercised, despite final_spec.json's own residual_risks explicitly flagging this class of failure as one the design only 'guarantees... allocation-free in-memory undo and ordering of steps' for, not full recovery -- a claim the harness never actually tests.",
+            "Invariant #6 (NO ALLOCATION-BEARING CALL BETWEEN THE TAKE AND THE GRANT) is asserted via checkNoAllocationBetweenTakeAndGrant in exactly one injection, BUY-HAPPY (2 of 72 runs), not in every successful buy despite harness_plan.json listing it under invariants_checked_every_case. BUY-SILENT-WRITE-FAILURE, BUY-LAZY-LOAD-ZERO, WARM-DISARMS-SAVE-THREAD, the boundary 'bought' case in BUY-REFUSE-LIMIT-REACHED, and METADATA-STACKS-NEVER-SPENT all complete a real grant without this check running.",
+            "Invariant #7 ORDERING is checked via checkBuyOrdering in only 3 of the buy-success runs and via checkSellOrdering in only 1 sell-success run (SELL-HAPPY), not in every successful trade despite being listed as checked every case. The 'sold' outcome in SELL-PAYOUT-LISTENER-TELEPORTS and the boundary 'sold' outcome in SELL-REFUSE-AMOUNT-TOO-SMALL are never ordering-checked.",
+            "Invariant #8's 'exactly one summary record' clause is verified with an explicit countAtLevel(...)==1 check in only 4 of the roughly 30 injections that produce a SEVERE/WARNING (grep confirms exactly 4 call sites: 3 WARNING, 1 SEVERE). Most SEVERE-producing failure injections (BUY-SAVE-OOM-CLEAN-UNWIND, BUY-SAVE-OOM-STALE-WRITER-WINS, BUY-REMOVECURRENCY-THROWS-PARTWAY, BUY-UNDO-OUT-OF-RANGE-GRANT-STANDS, BUY-UNDO-RELATIVE-IN-RANGE, SELL-SAVE-OOM-CLEAN-UNWIND, SELL-UNDO-FAILS-DEDUCTION-STANDS, SELL-UNDO-RELATIVE-IN-RANGE, and every SELL-PAYOUT-* failure case) only confirm a matching SEVERE exists via findAtLevel, never that it is the only one produced; a duplicate or extra spurious log record on any of these paths would slip through undetected.",
+            "info()'s claimed guarantee that it 'can never return transaction-failed, items-lost, bought or sold under ANY knob combination' (harness_plan.json's own wording for INFO-WARM-APPLIES-FIX) is checked in exactly one injection with one specific knob (fixNegativeDeficit=50), not swept across INFO-DATASTORE-NULL or any other info()-relevant knob combination; the 'ANY knob combination' claim is asserted in the plan but not actually tested that broadly."
+          ],
+          "stub_infidelities": [
+            {
+              "stub": "org.bukkit.inventory.PlayerInventory.addItem(ItemStack...)",
+              "real_behaviour": "CraftBukkit's addItem mutates the caller's own ItemStack argument in place: the leftover HashMap it returns holds the SAME object the caller passed in, with its amount field reduced to whatever was not placed. This is exactly the behaviour BarterService's own deliver() javadoc asserts and relies on for its reasoning: \"The leftover map's values are the argument stacks mutated in place, which is why size was read before the call.\"",
+              "stub_behaviour": "The stub never mutates the `incoming` argument. It always builds a brand-new ItemStack for the leftover entry (`leftover.put(idx, new ItemStack(incoming.getType(), leftoverAmount, false))`), so the original `stack` object passed into `inventory.addItem(stack)` keeps its original amount (== the chunk size requested) forever, no matter how much was actually placed.",
+              "impact": "No effect on the current 72 passing runs, because BarterService.deliver() only ever reads .getAmount() off the values inside the returned leftover map, never off the original `stack` variable after the call -- so the difference is currently unobservable. But it means this harness cannot detect the exact regression its own javadoc warns about: if deliver() were later 'simplified' to read stack.getAmount() after the addItem() call instead of the pre-captured `size` variable, it would silently miscount on a real Paper server (where that read now returns the leftover, not the requested size) while still passing every injection here (where the stub leaves stack.getAmount() unchanged at `size`)."
+            }
+          ],
+          "vacuous_assertions": [],
+          "verdict": "needs-fixes"
+        }
+      }
+    ]
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "Build"
+    },
+    {
+      "type": "workflow_phase",
+      "index": 2,
+      "title": "Harness"
+    },
+    {
+      "type": "workflow_phase",
+      "index": 3,
+      "title": "Review"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "build:writer",
+      "phaseIndex": 1,
+      "phaseTitle": "Build",
+      "agentId": "a0e1fdace35159752",
+      "model": "claude-opus-5-5[1m]",
+      "state": "done",
+      "startedAt": 1790290699362,
+      "queuedAt": 1790290699327,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "[INFO] [INFO] --- compiler:3.16.0:testCompile (default-test…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790291439153,
+      "tokens": 211136,
+      "toolCalls": 46,
+      "durationMs": 739787,
+      "resultPreview": "{\"build_ok\":true,\"build_tail\":\"[INFO] \\n[INFO] --- compiler:3.16.0:testCompile (default-testCompile) @ ClaimBarter ---\\n[INFO] No sources to compile\\n[INFO] \\n[INFO] --- surefire:3.5.4:test (default-test) @ ClaimBarter ---\\n[INFO] No tests to run.\\n[INFO] \\n[INFO] --- jar:3.5.0:jar (default-jar) @ ClaimBarter ---\\n[INFO] Building jar: /home/diegot4l/Projects/ClaimBarter/target/ClaimBarter-1.0.2-SN…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "build:harness",
+      "phaseIndex": 1,
+      "phaseTitle": "Build",
+      "agentId": "aab006c98fe526e1c",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790290699365,
+      "queuedAt": 1790290699327,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f6…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790292880889,
+      "tokens": 355508,
+      "toolCalls": 71,
+      "durationMs": 2181520,
+      "resultPreview": "{\"harness_dir\":\"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness\",\"run_command\":\"bash \\\"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/run.sh\\\"\",\"compiles_against_committed\":true,\"baseline\":{\"passed\":12,\"failed\":42,\"sample_failures\":[\"RESULT BUY-HAPPY mirror FAIL expected the I…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "harness:run-1",
+      "phaseIndex": 2,
+      "phaseTitle": "Harness",
+      "agentId": "a3e9293f174b8d8fd",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292884052,
+      "queuedAt": 1790292884024,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790292901396,
+      "tokens": 59012,
+      "toolCalls": 3,
+      "durationMs": 17343,
+      "resultPreview": "{\"compiles\":true,\"compile_error\":\"\",\"passed\":54,\"failed\":0,\"total\":54,\"failures\":[],\"raw_tail\":\"RESULT SELL-PAYOUT-LISTENER-MERGES-DROP-THEN-CANCEL mirror PASS\\nRESULT SELL-PAYOUT-LISTENER-MERGES-DROP-THEN-CANCEL copy PASS\\nRESULT SELL-PAYOUT-LISTENER-TELEPORTS mirror PASS\\nRESULT SELL-PAYOUT-LISTENER-TELEPORTS copy PASS\\nRESULT SELL-PAYOUT-KICK-MID-PAYOUT mirror PASS\\nRESULT SELL-PAYOUT-KICK-MID-…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "review-1:mint",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a69cb0b8d6747e034",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292902990,
+      "queuedAt": 1790292902967,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "SERVER LOSS — reviewed BarterService.java (working tree, /h…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790293629374,
+      "tokens": 215210,
+      "toolCalls": 26,
+      "durationMs": 726378,
+      "resultPreview": "{\"lens\":\"SERVER LOSS — reviewed BarterService.java (working tree, /home/diegot4l/Projects/ClaimBarter/src/main/java/io/github/diegot4l/claimbarter/BarterService.java) line-by-line against docs/design/purchase-rollback/final_spec.json's numbered steps (B1-B12/U1-U7, S1-S12/SU1-SU6, I1-I7), and independently verified the bytecode claims the design depends on via javap against GriefPrevention-16.18.7…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "review-1:loss",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a8a131f9a10a74a2f",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292902992,
+      "queuedAt": 1790292902967,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "PLAYER LOSS AND LIES",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790293956230,
+      "tokens": 245809,
+      "toolCalls": 46,
+      "durationMs": 1051098,
+      "resultPreview": "{\"lens\":\"PLAYER LOSS AND LIES\",\"findings\":[{\"title\":\"A lone failure of the post-removal recount is treated identically to “removeCurrency itself may have failed”, discarding a fully-confirmed item count and aborting a purchase that removeCurrency actually completed\",\"severity\":\"spec-deviation\",\"file\":\"src/main/java/io/github/diegot4l/claimbarter/BarterService.java\",\"line\":289,\"scenario\":\"buy(playe…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 6,
+      "label": "review-1:ops",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a304bf8151d6a1d0b",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292902993,
+      "queuedAt": 1790292902967,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "OPERATOR TRUTH",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790293588100,
+      "tokens": 238542,
+      "toolCalls": 34,
+      "durationMs": 682968,
+      "resultPreview": "{\"findings\":[],\"lens\":\"OPERATOR TRUTH\"}"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 7,
+      "label": "review-1:conformance",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "ab4517ca67117baae",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292902994,
+      "queuedAt": 1790292902967,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Spec-conformance audit of src/main/java/io/github/diegot4l/…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790293361315,
+      "tokens": 147687,
+      "toolCalls": 16,
+      "durationMs": 456183,
+      "resultPreview": "{\"findings\":[],\"lens\":\"Spec-conformance audit of src/main/java/io/github/diegot4l/claimbarter/BarterService.java (working tree, branch fix/purchase-rollback) against docs/design/purchase-rollback/final_spec.json. Method: line-by-line trace of every numbered step (B1-B12, U1-U7, S1-S12, SU1-SU6, I1-I7), the delivery_accounting algorithm, the message_keys table, and the javadoc_claims_allowed list (…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 8,
+      "label": "review-1:harness-adequacy",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a7d6d94dbf79b775e",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790292902995,
+      "queuedAt": 1790292902968,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "needs-fixes",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790293539210,
+      "tokens": 212432,
+      "toolCalls": 62,
+      "durationMs": 636214,
+      "resultPreview": "{\"missing_injections\":[\"No injection ever produces `invalid-amount` (buy with items<=0 or sell with blocks<=0 is never called), even though this is one of the 14 keys the NO-INVENTED-KEYS injection claims to cover.\",\"No injection ever produces `limit-reached`, even though `setup()`'s `maxPurchasedBlocks` parameter exists specifically to drive it (every call site that passes it explicitly passes 0 …"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 9,
+      "label": "review-1:triage",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a243e43f48d2a9f69",
+      "model": "claude-opus-5-5[1m]",
+      "state": "done",
+      "startedAt": 1790293958930,
+      "queuedAt": 1790293958913,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790294424104,
+      "tokens": 182334,
+      "toolCalls": 28,
+      "durationMs": 465174,
+      "resultPreview": "{\"decisions\":[{\"id\":\"FINDING-1: lone post-removal recount failure collapses to UNKNOWN and skips the refund\",\"semantics\":\"buy(): removeCurrency returns normally, then the B9 verification recount (countCurrency -> getStorageContents) throws. itemsTaken becomes UNKNOWN, failure is the recount's throwable, no grant is made, the refund is skipped, the SEVERE says 'an unknown number taken, 0 returned (…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 10,
+      "label": "review-1:fix",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "afc28cfcd078001d3",
+      "model": "claude-opus-5-5[1m]",
+      "state": "done",
+      "startedAt": 1790294426717,
+      "queuedAt": 1790294426702,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "I applied all 10 harness decisions. FINDING-1 had fix_instr…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790294722102,
+      "tokens": 152481,
+      "toolCalls": 25,
+      "durationMs": 295385,
+      "resultPreview": "{\"build_ok\":true,\"files_changed\":[\"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/harness/support/CallLog.java\",\"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e995f641-d276-4d9f-9efe-0dd6b44b31d4/scratchpad/harness/stubs/me/ryanhamshire/GriefPrevention/PlayerData.java\",\"/tmp/claude-1000/-home-diegot4l-Projects-ClaimBarter/e…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 11,
+      "label": "harness:run-101",
+      "phaseIndex": 2,
+      "phaseTitle": "Harness",
+      "agentId": "aee3a0501ec80ea75",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294724312,
+      "queuedAt": 1790294724305,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790294741223,
+      "tokens": 58757,
+      "toolCalls": 2,
+      "durationMs": 16910,
+      "resultPreview": "{\"compiles\":true,\"compile_error\":\"\",\"passed\":72,\"failed\":0,\"total\":72,\"failures\":[],\"raw_tail\":\"RESULT SELL-PAYOUT-KICK-MID-PAYOUT copy PASS\\nRESULT SELL-PAYOUT-DROP-THROWS-UNCONFIRMED mirror PASS\\nRESULT SELL-PAYOUT-DROP-THROWS-UNCONFIRMED copy PASS\\nRESULT INFO-WARM-APPLIES-FIX mirror PASS\\nRESULT INFO-WARM-APPLIES-FIX copy PASS\\nRESULT INFO-DATASTORE-NULL mirror PASS\\nRESULT INFO-DATASTORE-NULL…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 12,
+      "label": "review-2:mint",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "aaf82aa3051364c05",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294743966,
+      "queuedAt": 1790294743964,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "SERVER LOSS",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790295347851,
+      "tokens": 192419,
+      "toolCalls": 27,
+      "durationMs": 603878,
+      "resultPreview": "{\"lens\":\"SERVER LOSS\",\"findings\":[]}"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 13,
+      "label": "review-2:loss",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a1095ad00eca68555",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294743968,
+      "queuedAt": 1790294743964,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "PLAYER LOSS AND LIES — read BarterService.java's actual buy…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790295550370,
+      "tokens": 236423,
+      "toolCalls": 27,
+      "durationMs": 803660,
+      "resultPreview": "{\"lens\":\"PLAYER LOSS AND LIES — read BarterService.java's actual buy()/sell()/deliver() control flow (not the spec prose) for any path where the player ends with fewer items+blocks than the truthful/achievable outcome, or a Result/log claims something the measured state doesn't support, or a count used to decide payout is wrong.\",\"findings\":[{\"title\":\"Recount-alone-throws after a clean take is tre…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 14,
+      "label": "review-2:ops",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a21da6b3c9e66f2e9",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294743969,
+      "queuedAt": 1790294743964,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "OPERATOR TRUTH: verified every SEVERE/WARNING/INFO in Barte…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790295586271,
+      "tokens": 225795,
+      "toolCalls": 39,
+      "durationMs": 839559,
+      "resultPreview": "{\"lens\":\"OPERATOR TRUTH: verified every SEVERE/WARNING/INFO in BarterService.java is composed only from measured ledger values, never falsely claims a durable write, never says undone/restored/given-back when the corresponding flag is false, includes every applicable compositional fix clause with the exact /adjustbonusclaimblocks command whenever a pool mutation applied, contains no hardcoded play…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 15,
+      "label": "review-2:conformance",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "a03a90c3c3bf9109f",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294743970,
+      "queuedAt": 1790294743964,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "spec-conformance audit: BarterService.java (working tree) v…",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790295320936,
+      "tokens": 165229,
+      "toolCalls": 30,
+      "durationMs": 574225,
+      "resultPreview": "{\"findings\":[{\"title\":\"sell() javadoc (mirroring spec S6) overclaims GriefPrevention always maps overflow in getRemainingClaimBlocks() to 0\",\"severity\":\"spec-deviation\",\"file\":\"src/main/java/io/github/diegot4l/claimbarter/BarterService.java\",\"line\":539,\"scenario\":\"final_spec.json S6 requires: \\\"Javadoc must state this is GriefPrevention's own figure: it includes permission-group bonus blocks and m…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 16,
+      "label": "review-2:harness-adequacy",
+      "phaseIndex": 3,
+      "phaseTitle": "Review",
+      "agentId": "accfb2720437bf7e6",
+      "model": "claude-sonnet-5",
+      "state": "done",
+      "startedAt": 1790294743972,
+      "queuedAt": 1790294743964,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "needs-fixes",
+      "promptPreview": "Paper plugin ClaimBarter at /home/diegot4l/Projects/ClaimBarter, branch fix/purchase-rollback checked out (HEAD 183ae00, clean; docs/design/purchase-rollback/ holds the spec and plan and must not be edited). Read /home/diegot4l/Projects/ClaimBarter/CLAUDE.md first and obey it: Allman braces, package-private classes, Javadoc that explains WHY, no player-facing string in Java, message keys have no d…",
+      "promptFramed": true,
+      "lastProgressAt": 1790295435786,
+      "tokens": 241832,
+      "toolCalls": 54,
+      "durationMs": 691814,
+      "resultPreview": "{\"missing_injections\":[\"CRITICAL: getNameThrows (Player) is built and explicitly earmarked in harness_plan.json (\\\"for the PREPARE row\\\") but no injection in Harness.java ever sets it. This hides a real, reproducible spec violation: in both BarterService.buy() and sell(), the PREPARE try/catch's catch block rebuilds the SEVERE message with a second, unguarded call to player.getName(); if getName()…"
+    }
+  ],
+  "totalTokens": 3140606,
+  "totalToolCalls": 536
+}
