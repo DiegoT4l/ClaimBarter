@@ -54,26 +54,17 @@ import java.util.logging.Logger;
  * applied for a mutation that never happened is itself the bug: it subtracts
  * blocks that were never added, or refunds items that were never taken.
  *
- * <p>getClaims() is forced on the main thread before the bonus pool is read.
- * PlayerData.claims is written in only two places, the constructor and
- * getClaims offset 15, and GriefPrevention's fix-negative credit to
- * bonusClaimBlocks at offset 428 lives inside the claims == null branch; so
- * after this call no SavePlayerDataThread this plugin starts can write the
- * bonus pool. Without it, the first save thread a trade started could credit
- * the pool on another thread while the trade was still computing from it.
- *
- * <p>A rollback written with savePlayerDataSync is ordered only against writes
- * that START LATER. An asynchronous writer already in flight can still
- * truncate the file afterwards: overrideSavePlayerData is not synchronized and
- * reads the pool at serialization time on its own thread.
+ * <p>Before the pool is read, {@link #warmClaimData} makes GriefPrevention
+ * run its own pool correction on this thread, so no save thread a trade
+ * starts can write the pool behind the trade's back.
  *
  * <p>savePlayerDataSync is used only on the failure path, never on the trade
- * itself. There it would put file I/O on the main thread on every purchase and
- * every sale, and a stall there is felt by everyone on the server rather than
- * by the one player trading - a cost paid on every success to guard a path
- * that only opens when something has already gone wrong. On the failure path
- * that reasoning inverts: it runs rarely, and leaving the correction in memory
- * alone would leave the file holding whatever the last save serialized.
+ * itself. On every trade it would put file I/O on the main thread, a stall
+ * felt by everyone on the server, to guard a path that only opens when
+ * something has already gone wrong. On the failure path it runs rarely, and
+ * leaving the correction in memory alone would leave the file holding
+ * whatever the last save serialized. What that write is and is not ordered
+ * against is on {@link #persistRollback}.
  *
  * <p>No number is reported to a player that the plugin did not measure. Where
  * no configured message states the outcome truthfully, the plugin throws
@@ -261,33 +252,15 @@ final class BarterService
         }
         catch (Throwable prepFailure)
         {
-            // Named by UUID: getName() may be the call that just threw, and a
-            // second throw here would escape without the record. Nothing has
-            // moved, so a record lost to the logger strands nothing either.
-            try
-            {
-                logger.log(Level.SEVERE, "Refused a purchase for " + playerId
-                        + ": the transaction could not be prepared; nothing moved", prepFailure);
-            }
-            catch (Throwable ignored)
-            {
-                // See above.
-            }
-            return Result.fail("transaction-failed");
+            return refuseUnprepared("a purchase", playerId, prepFailure);
         }
 
         int itemsTaken = 0;
         int removed = UNKNOWN;
         boolean recountFailed = false;
         boolean blocksMutated = false;
-        // Recorded so the ledger names every call it covers. Nothing branches
-        // on it: the save is the last call in its try, so it is true exactly
-        // when that try completed and failure is still null.
-        boolean saveStarted = false;
         boolean poolRestored = false;
-        boolean refundSkipped = false;
         int returned = 0;
-        int liveAfter = UNKNOWN;
         Throwable failure = null;
         Throwable undoFailure = null;
         Throwable persistFailure = null;
@@ -335,7 +308,6 @@ final class BarterService
                 // is explicit: "MUST be called after you're done making changes,
                 // otherwise a reload will lose them."
                 store.savePlayerData(playerId, data);
-                saveStarted = true;
             }
             catch (Throwable thrown)
             {
@@ -351,22 +323,7 @@ final class BarterService
 
         if (failure == null)
         {
-            // Diagnostics only. The trade has completed, so a diagnostic that
-            // fails must not turn it into an error.
-            try
-            {
-                liveAfter = data.getBonusClaimBlocks();
-                if (liveAfter != (int) updated)
-                {
-                    logger.warning("After " + name + "'s purchase the bonus pool reads " + liveAfter
-                            + " in memory but " + updated
-                            + " was written; something outside ClaimBarter wrote it during the trade");
-                }
-            }
-            catch (Throwable ignored)
-            {
-                // The trade stands either way; see above.
-            }
+            warnIfForeignWrite(data, name, "purchase", (int) updated);
             // The only handle an operator has for reconciling a write failure
             // GriefPrevention swallowed against a specific trade.
             try
@@ -376,7 +333,7 @@ final class BarterService
             }
             catch (Throwable ignored)
             {
-                // The trade stands either way; see above.
+                // Diagnostics only; the trade stands either way.
             }
             return Result.ok("bought",
                     "blocks", blocks, "items", items, "item", settings.currencyName(items));
@@ -389,27 +346,7 @@ final class BarterService
         {
             try
             {
-                int live = data.getBonusClaimBlocks();
-                if (live == (int) updated)
-                {
-                    // Nothing else wrote the pool, measured just now, so the
-                    // relative and absolute undo coincide and the pre-boxed
-                    // value can be written without allocating. It is not a
-                    // stale snapshot clobbering a foreign change: there is none.
-                    data.setBonusClaimBlocks(restoreBox);
-                    poolRestored = true;
-                }
-                else
-                {
-                    // Someone else credited or debited the pool meanwhile, so
-                    // only this purchase's own grant is taken back.
-                    long relative = (long) live - blocks;
-                    if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE)
-                    {
-                        data.setBonusClaimBlocks(Integer.valueOf((int) relative));
-                        poolRestored = true;
-                    }
-                }
+                poolRestored = undo(data, (int) updated, restoreBox, -blocks);
             }
             catch (Throwable thrown)
             {
@@ -422,7 +359,7 @@ final class BarterService
             poolRestored = true;
         }
 
-        refundSkipped = (blocksMutated && !poolRestored) || itemsTaken == UNKNOWN;
+        boolean refundSkipped = (blocksMutated && !poolRestored) || itemsTaken == UNKNOWN;
         if (!refundSkipped && itemsTaken > 0)
         {
             // deliver never throws; the guard is so a future change to it
@@ -434,14 +371,7 @@ final class BarterService
             }
             catch (Throwable thrown)
             {
-                if (refund.failure == null)
-                {
-                    refund.failure = thrown;
-                }
-                else
-                {
-                    suppress(refund.failure, thrown);
-                }
+                refund.failure = combine(refund.failure, thrown);
             }
         }
 
@@ -454,14 +384,7 @@ final class BarterService
             persistFailure = persistRollback(store, playerId, data);
         }
 
-        try
-        {
-            liveAfter = data.getBonusClaimBlocks();
-        }
-        catch (Throwable ignored)
-        {
-            liveAfter = UNKNOWN;
-        }
+        int liveAfter = readPool(data);
 
         suppress(failure, undoFailure);
         suppress(failure, refund.failure);
@@ -638,25 +561,11 @@ final class BarterService
         }
         catch (Throwable prepFailure)
         {
-            // As in buy(): by UUID, and a lost record strands nothing.
-            try
-            {
-                logger.log(Level.SEVERE, "Refused a sale for " + playerId
-                        + ": the transaction could not be prepared; nothing moved", prepFailure);
-            }
-            catch (Throwable ignored)
-            {
-                // See buy().
-            }
-            return Result.fail("transaction-failed");
+            return refuseUnprepared("a sale", playerId, prepFailure);
         }
 
         boolean blocksMutated = false;
-        // As in buy(): true exactly when the try below completed, so nothing
-        // branches on it.
-        boolean saveStarted = false;
         boolean poolRestored = false;
-        int liveAfter = UNKNOWN;
         Throwable failure = null;
         Throwable undoFailure = null;
         Throwable persistFailure = null;
@@ -667,7 +576,6 @@ final class BarterService
             data.setBonusClaimBlocks(deductBox);
             blocksMutated = true;
             store.savePlayerData(playerId, data);
-            saveStarted = true;
         }
         catch (Throwable thrown)
         {
@@ -678,33 +586,7 @@ final class BarterService
         {
             try
             {
-                if (!blocksMutated)
-                {
-                    poolRestored = true;
-                }
-                else
-                {
-                    int live = data.getBonusClaimBlocks();
-                    if (live == purchased - blocks)
-                    {
-                        // Measured untouched since the deduction, so the
-                        // pre-boxed value is this sale's own undo, written
-                        // without allocating.
-                        data.setBonusClaimBlocks(restoreBox);
-                        poolRestored = true;
-                    }
-                    else
-                    {
-                        // Adds back only this sale's own deduction, so a
-                        // foreign change made meanwhile survives.
-                        long relative = (long) live + blocks;
-                        if (relative >= Integer.MIN_VALUE && relative <= Integer.MAX_VALUE)
-                        {
-                            data.setBonusClaimBlocks(Integer.valueOf((int) relative));
-                            poolRestored = true;
-                        }
-                    }
-                }
+                poolRestored = !blocksMutated || undo(data, purchased - blocks, restoreBox, blocks);
             }
             catch (Throwable thrown)
             {
@@ -718,14 +600,7 @@ final class BarterService
                 persistFailure = persistRollback(store, playerId, data);
             }
 
-            try
-            {
-                liveAfter = data.getBonusClaimBlocks();
-            }
-            catch (Throwable ignored)
-            {
-                liveAfter = UNKNOWN;
-            }
+            int liveAfter = readPool(data);
 
             suppress(failure, undoFailure);
             suppress(failure, persistFailure);
@@ -787,20 +662,7 @@ final class BarterService
 
         // The deduction is applied and its save thread started, so from here
         // the server can no longer lose; only the payout can fall short.
-        try
-        {
-            liveAfter = data.getBonusClaimBlocks();
-            if (liveAfter != purchased - blocks)
-            {
-                logger.warning("After " + name + "'s sale the bonus pool reads " + liveAfter
-                        + " in memory but " + (purchased - blocks)
-                        + " was written; something outside ClaimBarter wrote it during the trade");
-            }
-        }
-        catch (Throwable ignored)
-        {
-            // Diagnostics only; the sale stands either way.
-        }
+        warnIfForeignWrite(data, name, "sale", purchased - blocks);
         deliver(player, items, "payout for a sale", payout);
         int paid = payout.delivered;
 
@@ -843,17 +705,12 @@ final class BarterService
     /**
      * Reports the exchange rate and the player's own pool.
      *
-     * <p>Not side-effect-free, and it cannot be made so from here. Querying a
-     * player's claims makes GriefPrevention flush newly accrued blocks and
-     * may run its fix-negative pass, both in memory. That is GriefPrevention's
-     * own behaviour on any claims query - a shovel click does the same - and
-     * ClaimBarter does not persist it. The warm's WARNING is the record. buy()
-     * and sell() emit the same line through the same warm; this is merely the
-     * way to trigger it without trading.
-     *
-     * <p>The warm also makes the two numbers agree: the fix-negative pass, if
-     * any, runs before the pool is read, so getRemainingClaimBlocks() runs
-     * with claims already non-null and performs no further pool write.
+     * <p>Not side-effect-free, and it cannot be made so from here: the warm
+     * lets GriefPrevention flush accrued blocks and run its fix-negative pass
+     * in memory, as any claims query does - a shovel click included. ClaimBarter
+     * does not persist it, and the warm's WARNING, the same one buy() and
+     * sell() emit, is the record. Because the warm runs first, the two numbers
+     * reported describe one state.
      *
      * <p>Deliberately without a try/catch. Nothing ClaimBarter owns is live,
      * so a throw belongs to the dispatcher, and a lookup must never be able to
@@ -884,7 +741,9 @@ final class BarterService
      * <p>getClaims() is called for its side effect. Its first call per
      * PlayerData runs the fix-negative pass, which credits bonusClaimBlocks,
      * and leaves claims non-null so no save thread this trade starts can ever
-     * take that branch and write the pool behind the trade's back. The value
+     * take that branch and write the pool behind the trade's back. In 16.18.7
+     * claims is assigned only by the constructor and at getClaims offset 15,
+     * and the credit at offset 428 sits inside the claims == null branch. The value
      * returned is the post-fix one, so the trade is computed from, and undone
      * to, a pool that already includes GriefPrevention's credit rather than
      * one that would clobber it.
@@ -949,8 +808,8 @@ final class BarterService
      * savePlayerData's whole body is {@code new SavePlayerDataThread(...).start()},
      * so if it threw, no thread was started and nothing of this trade reached
      * the file. What this covers is the other case. GriefPrevention saves the
-     * same PlayerData from several places, and overrideSavePlayerData reads
-     * getBonusClaimBlocks() at serialization time, so an unrelated save that
+     * same PlayerData from several places, and overrideSavePlayerData, which
+     * is not synchronized, reads getBonusClaimBlocks() at serialization time, so an unrelated save that
      * happened to serialize between the mutation and the failure will have
      * written the abandoned total. Then the file is wrong and only a write
      * fixes it.
@@ -978,6 +837,79 @@ final class BarterService
         catch (Throwable thrown)
         {
             return thrown;
+        }
+    }
+
+    /**
+     * Takes back one trade's own change to the pool and reports whether it
+     * could. {@code written} is what the trade set, {@code restoreBox} the
+     * pre-trade value boxed before anything moved, and {@code delta} the
+     * correction that reverses the trade (negative for a grant).
+     *
+     * <p>A pool still reading {@code written} was touched by nothing else, so
+     * the relative and absolute undo coincide and the pre-boxed value is
+     * written without allocating. Otherwise someone credited or debited the
+     * pool meanwhile, and only this trade's own change is reversed so theirs
+     * survives. A correction outside int range is not written, and the caller
+     * reports the pool as not restored. The caller catches what this throws.
+     */
+    private static boolean undo(PlayerData data, int written, Integer restoreBox, long delta)
+    {
+        int live = data.getBonusClaimBlocks();
+        if (live == written)
+        {
+            data.setBonusClaimBlocks(restoreBox);
+            return true;
+        }
+        long relative = (long) live + delta;
+        if (relative < Integer.MIN_VALUE || relative > Integer.MAX_VALUE)
+        {
+            return false;
+        }
+        data.setBonusClaimBlocks(Integer.valueOf((int) relative));
+        return true;
+    }
+
+    /**
+     * Logs that a trade could not be prepared and refuses it.
+     *
+     * <p>Named by UUID: getName() may be the call that just threw. Nothing has
+     * moved, so a record lost to the logger strands nothing.
+     */
+    private Result refuseUnprepared(String operation, UUID playerId, Throwable failure)
+    {
+        try
+        {
+            logger.log(Level.SEVERE, "Refused " + operation + " for " + playerId
+                    + ": the transaction could not be prepared; nothing moved", failure);
+        }
+        catch (Throwable ignored)
+        {
+            // See above.
+        }
+        return Result.fail("transaction-failed");
+    }
+
+    /**
+     * After a completed trade, warns if the pool no longer reads what the
+     * trade wrote. Diagnostics only: the trade has completed, so a failure
+     * here must not turn it into an error.
+     */
+    private void warnIfForeignWrite(PlayerData data, String name, String trade, int written)
+    {
+        try
+        {
+            int live = data.getBonusClaimBlocks();
+            if (live != written)
+            {
+                logger.warning("After " + name + "'s " + trade + " the bonus pool reads " + live
+                        + " in memory but " + written
+                        + " was written; something outside ClaimBarter wrote it during the trade");
+            }
+        }
+        catch (Throwable ignored)
+        {
+            // See above.
         }
     }
 
@@ -1094,14 +1026,7 @@ final class BarterService
         }
         catch (Throwable thrown)
         {
-            if (out.failure == null)
-            {
-                out.failure = thrown;
-            }
-            else
-            {
-                suppress(out.failure, thrown);
-            }
+            out.failure = combine(out.failure, thrown);
         }
 
         int placed = placedTally;
@@ -1179,6 +1104,30 @@ final class BarterService
         {
             // The secondary is lost from the record; nothing else depends on it.
         }
+    }
+
+    /** The pool as it reads now, for a log line only; UNKNOWN if it cannot be read. */
+    private static int readPool(PlayerData data)
+    {
+        try
+        {
+            return data.getBonusClaimBlocks();
+        }
+        catch (Throwable ignored)
+        {
+            return UNKNOWN;
+        }
+    }
+
+    /** The first failure recorded wins; any later one is attached to it. */
+    private static Throwable combine(Throwable primary, Throwable next)
+    {
+        if (primary == null)
+        {
+            return next;
+        }
+        suppress(primary, next);
+        return primary;
     }
 
     /** Appends one fix-by-hand clause, space-joined to any before it. */
