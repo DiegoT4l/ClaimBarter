@@ -112,6 +112,10 @@ public final class Harness
         run("INFO-DATASTORE-NULL", Harness::injInfoDataStoreNull);
         run("METADATA-STACKS-NEVER-SPENT", Harness::injMetadataStacksNeverSpent);
         run("PREPARE-GETNAME-THROWS", Harness::injPrepareGetNameThrows);
+        run("SELL-PAYOUT-DROP-RETURNS-NULL", m -> injSellPayoutDropUnconfirmable(m, false));
+        run("SELL-PAYOUT-DROP-NULL-STACK", m -> injSellPayoutDropUnconfirmable(m, true));
+        run("LAZY-LOAD-THROWS", Harness::injLazyLoadThrows);
+        run("BUY-FIRST-COUNT-THROWS", Harness::injBuyFirstCountThrows);
         // Must stay LAST: its coverage check reads every key the runs above produced.
         run("NO-INVENTED-KEYS", Harness::injNoInventedKeys);
 
@@ -1520,6 +1524,123 @@ public final class Harness
         check(findAtLevel(c, Level.SEVERE, "Refused a sale for " + uuid, "nothing moved") != null,
                 "sell: expected the PREPARE SEVERE naming the UUID; entries=" + describeEntries(c));
 
+        check(sumPlainCurrency(c) == 64, "nothing may move; currency is " + sumPlainCurrency(c));
+        check(c.data.setterArguments.isEmpty(), "setBonusClaimBlocks must never be called");
+        check(c.store.saveCallLog.isEmpty(), "no save expected, got " + c.store.saveCallLog);
+        checkSetterNeverThrew(c);
+        return null;
+    }
+
+    /**
+     * A drop that returns no entity, or an entity whose stack reads null,
+     * cannot be confirmed. deliver's null checks must credit it as zero and
+     * carry on with the next stack, not throw a NullPointerException mid-payout.
+     * 192 items at 64 per stack is three drops; the second is unconfirmable.
+     */
+    private static String injSellPayoutDropUnconfirmable(boolean mirror, boolean nullStack)
+    {
+        Ctx c = setup(mirror, 1_000_000, 100, true, 1.0, 0);
+        c.inv.freeSlotOverride = 0;
+        if (nullStack)
+        {
+            c.world.nullStackOnDropNumbers.add(2);
+        }
+        else
+        {
+            c.world.returnNullOnDropNumbers.add(2);
+        }
+
+        BarterService service = new BarterService(c.settings, c.logger);
+        BarterService.Result result = service.sell(c.player, 19200);
+
+        check(result != null && !result.ok() && "items-lost".equals(result.messageKey()),
+                "expected items-lost, got " + result);
+        checkResultTruthfulKeyAndRender(result);
+        check(placeholderEquals(result.placeholders(), "lost", 64),
+                "expected lost=64 (the unconfirmable stack), got " + Arrays.toString(result.placeholders()));
+        check(c.world.dropCallCount() == 3, "expected all three stacks handed over, got " + c.world.dropCallCount());
+        RecordingHandler.Entry severe = findAtLevel(c, Level.SEVERE,
+                "128 confirmed (0 into the inventory, 128 dropped at their feet)", "0 unconfirmed", "64 lost");
+        check(severe != null, "expected the payout shortfall SEVERE; entries=" + describeEntries(c));
+        check(severe.thrown == null, "nothing threw, so no throwable may be attached, got " + severe.thrown);
+
+        checkSetterNeverThrew(c);
+        return null;
+    }
+
+    /**
+     * GriefPrevention's lazy load throwing inside the warm, before anything
+     * is prepared. The warm is deliberately unguarded: nothing ClaimBarter
+     * owns has moved, so the throw belongs to the dispatcher. Mirror runs the
+     * Error, copy the RuntimeException.
+     */
+    private static String injLazyLoadThrows(boolean mirror)
+    {
+        for (String op : List.of("buy", "sell", "info"))
+        {
+            Ctx c = setup(mirror, (Integer) null, 100, true, 1.0, 0);
+            putCurrency(c, 0, 64);
+            Throwable planted = mirror
+                    ? new Error("harness: lazy load threw")
+                    : new RuntimeException("harness: lazy load threw");
+            if (mirror)
+            {
+                c.data.lazyLoadThrowsError = (Error) planted;
+            }
+            else
+            {
+                c.data.lazyLoadThrowsRuntime = (RuntimeException) planted;
+            }
+
+            BarterService service = new BarterService(c.settings, c.logger);
+            Throwable thrown = null;
+            try
+            {
+                switch (op)
+                {
+                    case "buy" -> service.buy(c.player, 2);
+                    case "sell" -> service.sell(c.player, 100);
+                    default -> service.info(c.player);
+                }
+            }
+            catch (Throwable t)
+            {
+                thrown = t;
+            }
+
+            check(thrown == planted, op + ": expected the lazy load's own throwable to propagate, got " + thrown);
+            check(sumPlainCurrency(c) == 64, op + ": nothing may move; currency is " + sumPlainCurrency(c));
+            check(c.data.setterArguments.isEmpty(), op + ": setBonusClaimBlocks must never be called");
+            check(c.store.saveCallLog.isEmpty(), op + ": no save expected, got " + c.store.saveCallLog);
+            check(World.GLOBAL_DROP_LOG.isEmpty(), op + ": nothing may be dropped");
+            checkSetterNeverThrew(c);
+        }
+        return null;
+    }
+
+    /**
+     * The B2 refusal count is the first inventory read and runs before
+     * anything is prepared; its throw propagates and nothing moves.
+     */
+    private static String injBuyFirstCountThrows(boolean mirror)
+    {
+        Ctx c = setup(mirror, 500, 100);
+        putCurrency(c, 0, 64);
+        c.inv.throwOnGetStorageContentsCallN = 1;
+
+        BarterService service = new BarterService(c.settings, c.logger);
+        Throwable thrown = null;
+        try
+        {
+            service.buy(c.player, 2);
+        }
+        catch (Throwable t)
+        {
+            thrown = t;
+        }
+
+        check(thrown instanceof Error && thrown.getMessage().contains("call #1 "),
+                "expected the first count's Error to propagate, got " + thrown);
         check(sumPlainCurrency(c) == 64, "nothing may move; currency is " + sumPlainCurrency(c));
         check(c.data.setterArguments.isEmpty(), "setBonusClaimBlocks must never be called");
         check(c.store.saveCallLog.isEmpty(), "no save expected, got " + c.store.saveCallLog);
