@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.2](https://github.com/DiegoT4l/ClaimBarter/compare/v1.0.1...v1.0.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **barter:** stop the sell refund losing an item to float rounding ([#19](https://github.com/DiegoT4l/ClaimBarter/issues/19)) ([88d7d9e](https://github.com/DiegoT4l/ClaimBarter/commit/88d7d9ef3cac4302cbbbbd52bc38aba0eb434a51))
+* **barter:** unwind failed trades without minting blocks or losing items ([#16](https://github.com/DiegoT4l/ClaimBarter/issues/16)) ([54e1b45](https://github.com/DiegoT4l/ClaimBarter/commit/54e1b456331222441c44cf0e8429f75497a61b9d))
+* **messages:** inflect the {item} placeholder for its count ([#15](https://github.com/DiegoT4l/ClaimBarter/issues/15)) ([b0e2663](https://github.com/DiegoT4l/ClaimBarter/commit/b0e26637a025780cb3d8298761cd7ce4b14bfcd3))
+
+
+### Documentation
+
+* add the Hangar project overview ([#17](https://github.com/DiegoT4l/ClaimBarter/issues/17)) ([4816a06](https://github.com/DiegoT4l/ClaimBarter/commit/4816a064631311542404a6ffac13235e523fbf84))
+* **messages:** document the keys an upgrade must add by hand ([#21](https://github.com/DiegoT4l/ClaimBarter/issues/21)) ([1c6ee4d](https://github.com/DiegoT4l/ClaimBarter/commit/1c6ee4de560f1a17134b820db9b5414b1269d91e))
+
 ## [1.0.1](https://github.com/DiegoT4l/ClaimBarter/compare/v1.0.0...v1.0.1) (2026-09-12)
 
 
