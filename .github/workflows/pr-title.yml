@@ -35,6 +35,10 @@ jobs:
             gp
             build
           requireScope: false
+          # release-please titles its PRs "chore(main): release X", and main
+          # is a branch, not a scope contributors should use.
+          ignoreLabels: |
+            autorelease: pending
           subjectPattern: ^(?![A-Z]).+[^.]$
           subjectPatternError: |
             The subject must start with a lowercase letter and must not end with a period.
