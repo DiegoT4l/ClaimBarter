@@ -36,9 +36,23 @@ location; set `CLAIMBARTER_REPO` to test another checkout. The workflow scripts
 still contain absolute paths for the machine they last ran on; edit `REPO`,
 `TASKS`, `HARNESS` and `GP_JAR` at the top before running them again.
 
-## Decisions the maintainer still owes
+## Maintainer decisions
 
-Listed in `judge.json` under `unresolved_disagreements`. The spec defaults to:
-rethrow Errors after compensation; keep SEVERE for payout shortfalls; keep one
-INFO line per completed trade; report a stack whose drop threw as NOT received;
-no synchronous forward completion on the success path.
+The eight `unresolved_disagreements` in `judge.json`, as resolved on
+2026-09-24 (recorded in `final_spec.json` under `amendments`):
+
+1. **Rethrow vs return:** return. Errors are not rethrown after the unwind;
+   the player gets the measured result. The Bukkit dispatcher catches
+   Throwable anyway.
+2. **Synchronous forward completion:** no. A failed async save still unwinds;
+   no synchronous write on the success path.
+3. **SEVERE flood:** kept as SEVERE; a payout shortfall is real item loss.
+4. **Unconfirmed stack:** default kept, reported as not received, and the
+   operator is told to check the ground first.
+5. **Per-trade INFO line:** kept.
+6. **Live-server facts:** `addItem` does not use the offhand (confirmed on the
+   sandbox). The other four need failures that cannot be triggered on demand;
+   the harness runs both inventory semantics.
+7. **Unordered-writer mint:** a documented limitation, not a roadmap item.
+8. **Snapshot refund:** not adopted; it depends on the copy-vs-mirror question
+   in 6.

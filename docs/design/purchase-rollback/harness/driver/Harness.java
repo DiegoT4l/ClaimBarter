@@ -116,6 +116,7 @@ public final class Harness
         run("SELL-PAYOUT-DROP-NULL-STACK", m -> injSellPayoutDropUnconfirmable(m, true));
         run("LAZY-LOAD-THROWS", Harness::injLazyLoadThrows);
         run("BUY-FIRST-COUNT-THROWS", Harness::injBuyFirstCountThrows);
+        run("SELL-PAYOUT-FULL-DESPITE-ERROR", Harness::injSellPayoutFullDespiteError);
         // Must stay LAST: its coverage check reads every key the runs above produced.
         run("NO-INVENTED-KEYS", Harness::injNoInventedKeys);
 
@@ -621,9 +622,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 2);
+            result = service.buy(c.player, 2);
         }
         catch (Throwable t)
         {
@@ -631,7 +633,10 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(sumPlainCurrency(c) == 64, "expected currency refunded to 64, got " + sumPlainCurrency(c));
         check(World.GLOBAL_DROP_LOG.isEmpty(), "expected nothing dropped on refund");
         check(c.data.getBonusClaimBlocks() == 500, "expected live pool restored to 500");
@@ -681,16 +686,20 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 2);
+            result = service.buy(c.player, 2);
         }
         catch (Throwable t)
         {
             thrown = t;
         }
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(sumPlainCurrency(c) == 64, "expected currency refunded to 64, got " + sumPlainCurrency(c));
         check(c.data.getBonusClaimBlocks() == 500, "expected the LIVE pool to be correct (500)");
         check(c.store.hasCapturedStaleWrite(), "expected the stale writer to have captured a value");
@@ -727,16 +736,20 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 40);
+            result = service.buy(c.player, 40);
         }
         catch (Throwable t)
         {
             thrown = t;
         }
 
-        check(thrown instanceof Error, "expected an Error rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(sumPlainCurrency(c) == 64,
                 "expected final currency == 64 under " + (mirror ? "mirror" : "copy")
                         + " semantics, got " + sumPlainCurrency(c));
@@ -771,9 +784,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 40);
+            result = service.buy(c.player, 40);
         }
         catch (Throwable t)
         {
@@ -781,7 +795,8 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        check(thrown instanceof Error, "expected an Error rethrown, got " + thrown);
+        check(thrown instanceof IllegalStateException && thrown.getCause() instanceof Error,
+                "no message states this truthfully, so IllegalStateException caused by the Error; got " + thrown);
         check(log.stream().noneMatch(e -> e.startsWith("PlayerInventory.addItem")), "addItem must never be called");
         check(World.GLOBAL_DROP_LOG.isEmpty(), "dropItemNaturally must never be called");
         check(c.data.setterArguments.isEmpty(), "setBonusClaimBlocks must never be called");
@@ -807,9 +822,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 1);
+            result = service.buy(c.player, 1);
         }
         catch (Throwable t)
         {
@@ -817,7 +833,8 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        check(thrown instanceof OutOfMemoryError, "expected the original OutOfMemoryError rethrown, got " + thrown);
+        check(thrown instanceof IllegalStateException && thrown.getCause() instanceof OutOfMemoryError,
+                "no message states this truthfully, so IllegalStateException caused by the OutOfMemoryError; got " + thrown);
         check(log.stream().noneMatch(e -> e.startsWith("PlayerInventory.addItem")),
                 "the refund must be skipped: no addItem call expected");
         check(World.GLOBAL_DROP_LOG.isEmpty(), "the refund must be skipped: no dropItemNaturally call expected");
@@ -1020,9 +1037,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.sell(c.player, 500);
+            result = service.sell(c.player, 500);
         }
         catch (Throwable t)
         {
@@ -1030,7 +1048,10 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(log.stream().noneMatch(e -> e.startsWith("PlayerInventory.addItem")), "no items must be paid out");
         check(World.GLOBAL_DROP_LOG.isEmpty(), "no items must be dropped");
         check(c.data.getBonusClaimBlocks() == 1000, "expected pool restored to 1000");
@@ -1057,16 +1078,18 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.sell(c.player, 2_000_000_000);
+            result = service.sell(c.player, 2_000_000_000);
         }
         catch (Throwable t)
         {
             thrown = t;
         }
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown instanceof IllegalStateException && thrown.getCause() instanceof OutOfMemoryError,
+                "no message states this truthfully, so IllegalStateException caused by the OutOfMemoryError; got " + thrown);
         check(World.GLOBAL_DROP_LOG.isEmpty(), "no items must be paid out");
         check(c.store.saveCallLog.stream().noneMatch(s -> s.startsWith("savePlayerDataSync")),
                 "expected savePlayerDataSync to NEVER be called, got " + c.store.saveCallLog);
@@ -1119,16 +1142,20 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.sell(c.player, 500);
+            result = service.sell(c.player, 500);
         }
         catch (Throwable t)
         {
             thrown = t;
         }
 
-        check(thrown instanceof Error, "expected an Error rethrown by S12, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "items-lost".equals(result.messageKey()),
+                "expected items-lost, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(sumPlainCurrency(c) == 3, "expected exactly 3 currency placed, got " + sumPlainCurrency(c));
         check(c.data.getBonusClaimBlocks() == 500, "expected the sale itself correct: pool 500");
         check(c.store.saveCallLog.stream().anyMatch(s -> s.startsWith("savePlayerData(500)")),
@@ -1251,7 +1278,7 @@ public final class Harness
         Ctx c = setup(mirror, 1_000_000, 100, true, 1.0, 0);
         c.inv.freeSlotOverride = 0;
         // Fixed 2-runs-per-injection contract: mirror=true exercises the Error
-        // variant (rethrown by S12), mirror=false the RuntimeException variant
+        // variant, mirror=false the RuntimeException variant
         // (mapped to items-lost) - both named explicitly in the injection spec.
         if (mirror)
         {
@@ -1276,13 +1303,8 @@ public final class Harness
             thrown = t;
         }
 
-        if (mirror)
         {
-            check(thrown instanceof Error, "expected the Error rethrown by S12 after deliver logged, got " + thrown);
-        }
-        else
-        {
-            check(thrown == null, "the RuntimeException variant must not propagate, got " + thrown);
+            check(thrown == null, "neither variant may propagate since decision #1, got " + thrown);
             check(result != null && !result.ok() && "items-lost".equals(result.messageKey()),
                     "expected items-lost, got " + result);
             checkResultTruthfulKeyAndRender(result);
@@ -1379,7 +1401,7 @@ public final class Harness
         }
         catch (Throwable ignored)
         {
-            // expected: the OOM is rethrown once the unwind has run.
+            // Not expected since decision #1, but the check below is about the stacks.
         }
         ItemStack metaSlot2 = c2.inv.rawSlot(0);
         check(metaSlot2 != null && metaSlot2.getAmount() == 64 && metaSlot2.hasItemMeta(),
@@ -1422,7 +1444,7 @@ public final class Harness
      * recount throws. removeCurrency's own count of the array it wrote stands
      * in for the recount, so the 40 are refunded instead of withheld as an
      * unknown, and the record says where the figure came from. The recount's
-     * throwable is still the failure and is still rethrown.
+     * throwable is still the failure and is attached to the SEVERE.
      */
     private static String injBuyRecountAloneThrows(boolean mirror)
     {
@@ -1432,9 +1454,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 40);
+            result = service.buy(c.player, 40);
         }
         catch (Throwable t)
         {
@@ -1442,10 +1465,11 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        // (a) the recount's Error is what U7 rethrows.
-        check(thrown instanceof Error, "expected an Error rethrown, got " + thrown);
-        check(thrown.getMessage() != null && thrown.getMessage().contains("getStorageContents"),
-                "expected the recount's getStorageContents Error, got " + thrown);
+        // (a) nothing escapes; the refund makes transaction-failed truthful.
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
 
         // (b) the take ran, and its derived count was refunded in full.
         check(sumPlainCurrency(c) == 64, "expected all 64 back (40 taken, 40 refunded), got " + sumPlainCurrency(c));
@@ -1466,8 +1490,7 @@ public final class Harness
         check(nextInv != null && nextInv.startsWith("PlayerInventory.getStorageContents#"),
                 "expected the next inventory call after the take to be the recount, got " + nextInv);
         String callNo = nextInv.substring("PlayerInventory.getStorageContents#".length(), nextInv.indexOf('['));
-        check(thrown.getMessage().contains("call #" + callNo + " "),
-                "expected the rethrown Error to come from recount call #" + callNo + ", got " + thrown.getMessage());
+        check(callNo != null, "expected a recount call number");
 
         // (d) the refund went into the inventory; nothing needed dropping.
         check(logHas(log, "PlayerInventory.addItem"), "expected the refund to call addItem");
@@ -1489,7 +1512,8 @@ public final class Harness
         check(!severe.message.contains("unknown"), "the count is known and must not be reported as unknown");
 
         // (g) failure is the recount's own throwable, with nothing suppressed.
-        check(severe.thrown == thrown, "expected the SEVERE's thrown to be the rethrown recount Error");
+        check(severe.thrown instanceof Error && severe.thrown.getMessage().contains("call #" + callNo + " "),
+                "expected the SEVERE to carry the recount call #" + callNo + " Error, got " + severe.thrown);
         check(severe.suppressed.length == 0,
                 "expected no suppressed throwables, got " + Arrays.toString(severe.suppressed));
 
@@ -1648,6 +1672,33 @@ public final class Harness
         return null;
     }
 
+    /**
+     * deliver's before-count throws, so the payout records an Error, yet every
+     * item still lands. Since decision #1 nothing rethrows it and deliver logs
+     * only shortfalls, so sell() itself must log it: the sale stands as sold
+     * and the Error is on a SEVERE, never swallowed.
+     */
+    private static String injSellPayoutFullDespiteError(boolean mirror)
+    {
+        Ctx c = setup(mirror, 1000, 100, true, 1.0, 0);
+        c.data.remainingOverride = 1000;
+        c.inv.throwOnGetStorageContentsCallN = 1;
+
+        BarterService service = new BarterService(c.settings, c.logger);
+        BarterService.Result result = service.sell(c.player, 500);
+
+        check(result != null && result.ok() && "sold".equals(result.messageKey()), "expected sold, got " + result);
+        checkResultTruthfulKeyAndRender(result);
+        check(sumPlainCurrency(c) == 5, "expected all 5 paid out, got " + sumPlainCurrency(c));
+        check(c.data.getBonusClaimBlocks() == 500, "expected the pool at 500");
+        RecordingHandler.Entry severe = findAtLevel(c, Level.SEVERE, "paid out in full, but the payout raised this");
+        check(severe != null, "expected the full-payout SEVERE; entries=" + describeEntries(c));
+        check(severe.thrown instanceof Error && severe.thrown.getMessage().contains("call #1 "),
+                "expected the before-count Error attached, got " + severe.thrown);
+        checkSetterNeverThrew(c);
+        return null;
+    }
+
     /** The permitted half of invariant #5: the in-range relative undo may box fresh. */
     private static String injBuyUndoRelativeInRange(boolean mirror)
     {
@@ -1658,16 +1709,20 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.buy(c.player, 2);
+            result = service.buy(c.player, 2);
         }
         catch (Throwable t)
         {
             thrown = t;
         }
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(c.data.setterArguments.equals(List.of(700, 537)),
                 "expected setter arguments [700, 537], got " + c.data.setterArguments);
         check(c.data.setterAllocBytes.get(1) > 0,
@@ -1696,9 +1751,10 @@ public final class Harness
 
         BarterService service = new BarterService(c.settings, c.logger);
         Throwable thrown = null;
+        BarterService.Result result = null;
         try
         {
-            service.sell(c.player, 500);
+            result = service.sell(c.player, 500);
         }
         catch (Throwable t)
         {
@@ -1706,7 +1762,10 @@ public final class Harness
         }
         List<String> log = CallLog.snapshot();
 
-        check(thrown instanceof OutOfMemoryError, "expected OutOfMemoryError rethrown, got " + thrown);
+        check(thrown == null, "Maintainer decision #1 (2026-09-24): Errors are not rethrown after the unwind; got " + thrown);
+        check(result != null && !result.ok() && "transaction-failed".equals(result.messageKey()),
+                "expected transaction-failed, got " + result);
+        checkResultTruthfulKeyAndRender(result);
         check(c.data.setterArguments.equals(List.of(500, 1037)),
                 "expected setter arguments [500, 1037], got " + c.data.setterArguments);
         check(c.data.setterAllocBytes.get(1) > 0,
