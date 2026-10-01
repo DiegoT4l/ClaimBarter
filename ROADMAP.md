@@ -23,14 +23,6 @@ Currency is counted from the main inventory only. Extending the search is
 straightforward; the reason to be careful is that armor and offhand items are
 easy to lose track of, so this would likely be opt-in.
 
-### Accept items carrying metadata, behind an explicit opt-in
-
-Renamed, enchanted, and custom-model-data items are skipped rather than spent,
-so a keepsake that shares a material with the currency is never taken by
-accident. Some servers use custom-model-data items as currency on purpose and
-need the opposite behaviour. This would be a separate config flag, never the
-default.
-
 ### Follow the GriefPrevention 17.x/18.x line
 
 GriefPrevention's `master` carries breaking changes and upstream does not

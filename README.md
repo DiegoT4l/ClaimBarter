@@ -102,9 +102,11 @@ plugin disables itself rather than running on a configuration it cannot honour.
 
 ## What it deliberately does not do
 
-- **Only plain items count.** A renamed or enchanted ingot is skipped, not
+- **Only exact items count.** A renamed or enchanted ingot is skipped, not
   spent. Sharing a material with the currency should not cost a player a
-  keepsake or a quest item.
+  keepsake or a quest item. A server that mints its own coins can write
+  `currency.item` in `/give` syntax with components, and then only stacks
+  carrying exactly those components count.
 - **Only the main inventory is searched** — not armor slots, not the offhand,
   not ender chests.
 - **Selling draws from GriefPrevention's bonus pool**, which is the same pool

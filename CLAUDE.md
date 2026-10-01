@@ -60,9 +60,12 @@ placeholders). It caches `plugin.messages()` at the top of `onCommand`, so after
   vulnerability, not a bug.
 - **Only the bonus pool is ever written or sold.** Blocks a player accrued by
   playing are never sellable — that would turn idle time into an item faucet.
-- **Only plain stacks in the main inventory count as currency.** Anything with
-  item meta is skipped, and armor, offhand, and ender chests are not searched.
-  Both are intentional (`README.md`, "What it deliberately does not do").
+- **Only stacks `isSimilar` to the configured template, in the main inventory,
+  count as currency.** A bare material in `currency.item` means plain stacks
+  only, so anything with item meta is skipped; an item string with components
+  means exactly those components and no others. Armor, offhand, and ender
+  chests are not searched. Both are intentional (`README.md`, "What it
+  deliberately does not do").
 - **The command argument is always what the player hands over** — `buy` counts
   items, `sell` counts blocks. This avoids the rounding trap where asking for
   150 blocks at 100-per-item silently charges two items.

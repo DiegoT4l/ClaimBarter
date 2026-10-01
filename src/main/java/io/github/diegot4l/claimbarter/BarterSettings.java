@@ -1,7 +1,11 @@
 package io.github.diegot4l.claimbarter;
 
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.Locale;
 
@@ -17,9 +21,16 @@ import java.util.Locale;
  * {@code currency}, and a second field holding a name nothing ties back to the
  * material would let the two disagree, which is the failure this design exists
  * to prevent.
+ *
+ * <p>{@code currency} is a one-item template. For a bare material it carries
+ * no components at all, and only plain stacks match it; for an item written
+ * with components, such as {@code minecraft:trial_key[minecraft:custom_data=
+ * {coin:"iron_penny"}]}, a stack matches only when its components are exactly
+ * the template's. Either way the comparison is {@link ItemStack#isSimilar},
+ * so a renamed or enchanted copy is never spent by accident.
  */
 record BarterSettings(
-        Material currency,
+        ItemStack currency,
         String currencyPlural,
         int blocksPerItem,
         boolean sellingEnabled,
@@ -28,23 +39,8 @@ record BarterSettings(
 {
     static BarterSettings from(FileConfiguration config) throws InvalidSettingException
     {
-        String itemName = config.getString("currency.item", "IRON_INGOT");
-        Material currency = Material.matchMaterial(itemName);
-        if (currency == null)
-        {
-            throw new InvalidSettingException("currency.item", "no such material: " + itemName);
-        }
-        // Material.AIR reports isItem() == true, so it has to be excluded by
-        // name. Configured as currency it would be uncharged forever: empty
-        // inventory slots are null rather than stacks of air.
-        if (currency.isAir())
-        {
-            throw new InvalidSettingException("currency.item", "air cannot be used as currency");
-        }
-        if (!currency.isItem())
-        {
-            throw new InvalidSettingException("currency.item", itemName + " is not an obtainable item");
-        }
+        String itemName = config.getString("currency.item", "IRON_INGOT").strip();
+        ItemStack currency = parseCurrency(itemName);
 
         // getString with a non-null default never returns null: it falls back
         // to the default both when the key is absent and when it is YAML null.
@@ -123,9 +119,72 @@ record BarterSettings(
         return count == 1 ? displayName(currency) : currencyPlural;
     }
 
-    private static String displayName(Material material)
+    /**
+     * Reads {@code currency.item}: either a bare material name, which keeps the
+     * original meaning of "a plain stack of this", or a full item string with
+     * components in the same syntax as {@code /give}.
+     */
+    private static ItemStack parseCurrency(String itemName) throws InvalidSettingException
     {
-        return material.name().toLowerCase(Locale.ROOT).replace('_', ' ');
+        ItemStack currency;
+        if (itemName.indexOf('[') >= 0)
+        {
+            try
+            {
+                currency = Bukkit.getItemFactory().createItemStack(itemName);
+            }
+            catch (IllegalArgumentException e)
+            {
+                throw new InvalidSettingException("currency.item", "not a valid item: " + e.getMessage());
+            }
+            // An item string whose components all turned out to be defaults
+            // would silently mean "any plain stack", which is not what someone
+            // who wrote components asked for.
+            if (!currency.hasItemMeta())
+            {
+                throw new InvalidSettingException("currency.item",
+                        itemName + " carries no components; write the bare material instead");
+            }
+        }
+        else
+        {
+            Material material = Material.matchMaterial(itemName);
+            if (material == null)
+            {
+                throw new InvalidSettingException("currency.item", "no such material: " + itemName);
+            }
+            currency = material.isAir() ? null : new ItemStack(material);
+        }
+        // Material.AIR reports isItem() == true, so it has to be excluded by
+        // name. Configured as currency it would be uncharged forever: empty
+        // inventory slots are null rather than stacks of air.
+        if (currency == null || currency.getType().isAir())
+        {
+            throw new InvalidSettingException("currency.item", "air cannot be used as currency");
+        }
+        if (!currency.getType().isItem())
+        {
+            throw new InvalidSettingException("currency.item", itemName + " is not an obtainable item");
+        }
+        currency.setAmount(1);
+        return currency;
+    }
+
+    /**
+     * The name a player sees: the item's own {@code item_name} when the
+     * template sets one, so a coin built on another item is not described as
+     * that item; otherwise the material, lower-cased and spaced.
+     */
+    private static String displayName(ItemStack currency)
+    {
+        ItemMeta meta = currency.getItemMeta();
+        if (meta != null && meta.hasItemName())
+        {
+            return PlainTextComponentSerializer.plainText()
+                    .serialize(meta.itemName())
+                    .toLowerCase(Locale.ROOT);
+        }
+        return currency.getType().name().toLowerCase(Locale.ROOT).replace('_', ' ');
     }
 
     /**
