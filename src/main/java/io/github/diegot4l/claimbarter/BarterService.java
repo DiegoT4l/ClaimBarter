@@ -992,7 +992,8 @@ final class BarterService
                 int size = Math.min(remaining, settings.currency().getMaxStackSize());
                 // Cannot fail for validated settings: BarterSettings already
                 // rejects air and non-items, and size is at least 1.
-                ItemStack stack = new ItemStack(settings.currency(), size);
+                ItemStack stack = settings.currency().clone();
+                stack.setAmount(size);
                 Map<Integer, ItemStack> leftover = inventory.addItem(stack);
                 remaining -= size;
                 // The leftover map's values are the argument stacks mutated in
@@ -1143,9 +1144,10 @@ final class BarterService
     /**
      * Counts currency in the main inventory only, and only plain stacks.
      *
-     * <p>Anything carrying item metadata is skipped: a renamed or enchanted
-     * ingot may be a keepsake or a quest item, and spending it because it
-     * shares a material would be a bug the player pays for.
+     * <p>Anything whose metadata differs from the configured template is
+     * skipped: a renamed or enchanted ingot may be a keepsake or a quest item,
+     * and spending it because it shares a material would be a bug the player
+     * pays for.
      */
     private int countCurrency(PlayerInventory inventory)
     {
@@ -1166,9 +1168,11 @@ final class BarterService
 
     private boolean isPlainCurrency(ItemStack stack)
     {
-        return stack != null
-                && stack.getType() == settings.currency()
-                && !stack.hasItemMeta();
+        // isSimilar compares type and every component, ignoring the count.
+        // Against a bare material that means "no metadata at all", exactly as
+        // before; against a template with components it means those and no
+        // others.
+        return stack != null && stack.isSimilar(settings.currency());
     }
 
     /**

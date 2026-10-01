@@ -5,8 +5,15 @@
 # arrive. If you want an account-based economy, this is the wrong plugin.
 
 currency:
-  # Any Bukkit Material. The item must be plain — no custom name, no
-  # enchantments, no custom model data. See "Known limitations" in the README.
+  # Either a bare Bukkit Material, which accepts only plain stacks -- no custom
+  # name, no enchantments, no custom model data -- or a full item in /give
+  # syntax, which accepts only stacks whose components are exactly those:
+  #
+  #   item: 'minecraft:trial_key[minecraft:item_model="coins:iron_penny",minecraft:item_name="Iron Penny",minecraft:custom_data={coin:"iron_penny"}]'
+  #
+  # The second form is for servers that mint their own coins. Use a component
+  # a player cannot set in survival, such as custom_data; a custom name alone
+  # can be forged on an anvil. With an item_name set, messages use it.
   item: IRON_INGOT
 
   # Plural form of the item name, used in messages next to a count greater
