@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/DiegoT4l/ClaimBarter/compare/v1.0.2...v1.1.0) (2026-10-01)
+
+
+### Features
+
+* accept a component item as currency ([#26](https://github.com/DiegoT4l/ClaimBarter/issues/26)) ([1536097](https://github.com/DiegoT4l/ClaimBarter/commit/15360979f0d8f2a566320ecfd34ac18b5f15e791))
+
 ## [1.0.2](https://github.com/DiegoT4l/ClaimBarter/compare/v1.0.1...v1.0.2) (2026-09-25)
 
 
