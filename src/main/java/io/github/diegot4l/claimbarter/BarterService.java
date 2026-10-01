@@ -1142,7 +1142,8 @@ final class BarterService
     }
 
     /**
-     * Counts currency in the main inventory only, and only plain stacks.
+     * Counts currency in the main inventory only, and only stacks that match
+     * the configured template exactly.
      *
      * <p>Anything whose metadata differs from the configured template is
      * skipped: a renamed or enchanted ingot may be a keepsake or a quest item,
@@ -1154,7 +1155,7 @@ final class BarterService
         int total = 0;
         for (ItemStack stack : inventory.getStorageContents())
         {
-            if (isPlainCurrency(stack))
+            if (isCurrency(stack))
             {
                 total += stack.getAmount();
                 if (total < 0)
@@ -1166,7 +1167,7 @@ final class BarterService
         return total;
     }
 
-    private boolean isPlainCurrency(ItemStack stack)
+    private boolean isCurrency(ItemStack stack)
     {
         // isSimilar compares type and every component, ignoring the count.
         // Against a bare material that means "no metadata at all", exactly as
@@ -1188,7 +1189,7 @@ final class BarterService
         for (int slot = 0; slot < contents.length && remaining > 0; slot++)
         {
             ItemStack stack = contents[slot];
-            if (!isPlainCurrency(stack))
+            if (!isCurrency(stack))
             {
                 continue;
             }

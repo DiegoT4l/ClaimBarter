@@ -13,7 +13,9 @@ currency:
   #
   # The second form is for servers that mint their own coins. Use a component
   # a player cannot set in survival, such as custom_data; a custom name alone
-  # can be forged on an anvil. With an item_name set, messages use it.
+  # can be forged on an anvil. With an item_name set, messages use it; a
+  # custom_name is not read for messages, for the same reason, and without an
+  # item_name they fall back to the material's name.
   item: IRON_INGOT
 
   # Plural form of the item name, used in messages next to a count greater
